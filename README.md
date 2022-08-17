@@ -1,5 +1,7 @@
 # coin-calculate-app-ui
 
+#Running process with pnpm:
+
 ## Project setup
 ```
 pnpm install
@@ -10,20 +12,14 @@ pnpm install
 pnpm run serve
 ```
 
-### Compiles and minifies for production
+### npm+docker run process:
 ```
-pnpm run build
+docker build -t sg-vue-ui .
+docker run -d --name vueui -p 80:80 sg-vue-ui
+
 ```
 
-### Run your unit tests
-```
-pnpm run test:unit
-```
 
-### Lints and fixes files
-```
-pnpm run lint
-```
 
 ### Customize configuration
 See [Configuration Reference](https://cli.vuejs.org/config/).
