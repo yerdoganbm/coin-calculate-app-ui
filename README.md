@@ -1,8 +1,7 @@
 # coin-calculate-app-ui
 
-#Running process with pnpm:
 
-## Project setup
+### Running process with pnpm:
 ```
 pnpm install
 ```
