@@ -453,5 +453,148 @@ CREATE INDEX idx_letter_notification_log_2025_08_req ON letter_notification_log_
 CREATE INDEX idx_letter_notification_log_2025_08_sent ON letter_notification_log_2025_08 (sent_at);
 
 
+----------------------h2
+
+-- =========================
+-- Lookup Tables
+-- =========================
+CREATE TABLE IF NOT EXISTS ref_letter_request_type (
+    id SMALLINT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS ref_letter_scope (
+    id SMALLINT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS ref_letter_status (
+    id SMALLINT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE
+);
+
+-- =========================
+-- Main Tables
+-- =========================
+CREATE TABLE IF NOT EXISTS letter_request (
+    id UUID PRIMARY KEY,
+    request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id),
+    scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id),
+    scope_value VARCHAR(20),
+    first_payment_date DATE NOT NULL,
+    last_payment_date DATE NOT NULL,
+    tahakkuk_turu VARCHAR(50),
+    belge_no VARCHAR(50),
+    yil INTEGER,
+    karar_no_adi VARCHAR(200),
+    firma_vkn VARCHAR(20),
+    uretici_tckn VARCHAR(20),
+    ihracatci_unvan VARCHAR(250),
+    mektup_tipi_ui VARCHAR(100),
+    status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    created_by VARCHAR(64) NOT NULL,
+    branch_id VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    updater VARCHAR(64),
+    attempt_count SMALLINT NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMP,
+    next_attempt_at TIMESTAMP,
+    processing_started_at TIMESTAMP,
+    processing_finished_at TIMESTAMP,
+    processing_duration_ms INTEGER,
+    last_error_code VARCHAR(64),
+    last_error_message TEXT,
+    notify_emails TEXT,
+    notify_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    notify_sent_at TIMESTAMP,
+    notify_to_list TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_letter_request_status_next_attempt 
+    ON letter_request(status_id, next_attempt_at);
+
+-- =========================
+-- Letter Attempt Table
+-- =========================
+CREATE TABLE IF NOT EXISTS letter_attempt (
+    id UUID PRIMARY KEY,
+    request_id UUID NOT NULL,
+    item_id UUID,
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    error_code VARCHAR(64),
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_letter_attempt_req_item_start 
+    ON letter_attempt(request_id, item_id, started_at);
+
+-- =========================
+-- Letter Notification Log
+-- =========================
+CREATE TABLE IF NOT EXISTS letter_notification_log (
+    id UUID PRIMARY KEY,
+    request_id UUID NOT NULL,
+    sent_at TIMESTAMP NOT NULL,
+    recipient_email VARCHAR(255) NOT NULL,
+    status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_letter_notification_log_req_sent 
+    ON letter_notification_log(request_id, sent_at);
+
+-- =========================
+-- Letter Item Table (Hash Partition Simülasyonu Yok)
+-- =========================
+CREATE TABLE IF NOT EXISTS letter_item (
+    id UUID PRIMARY KEY,
+    request_id UUID NOT NULL,
+    content TEXT,
+    status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_letter_item_status 
+    ON letter_item(status_id);
+
+-- =========================
+-- Seed Data (Optional)
+-- =========================
+INSERT INTO ref_letter_request_type (id, name) VALUES
+(1, 'ODEME'),
+(2, 'HAKEDIS_DEVIR'),
+(3, 'DAVET')
+ON DUPLICATE KEY UPDATE name = VALUES(name);
+
+INSERT INTO ref_letter_scope (id, name) VALUES
+(1, 'BULK'),
+(2, 'SINGLE')
+ON DUPLICATE KEY UPDATE name = VALUES(name);
+
+INSERT INTO ref_letter_status (id, name) VALUES
+(1, 'PENDING'),
+(2, 'VALIDATION_FAIL'),
+(3, 'READY'),
+(4, 'PROCESSING'),
+(5, 'PARTIAL_SENT'),
+(6, 'SENT'),
+(7, 'FAILED'),
+(8, 'CANCELLED')
+ON DUPLICATE KEY UPDATE name = VALUES(name);
+
+
+spring.datasource.url=jdbc:h2:mem:testdb;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.h2.console.enabled=true
+
+spring.sql.init.mode=always
+spring.sql.init.schema-locations=classpath:schema-h2.sql
+spring.jpa.hibernate.ddl-auto=none
+
 
 
