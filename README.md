@@ -1022,3 +1022,265 @@ private DocGrupVeri odemeMektupDetayBorcHazirla(EftBilgiYonetim eftBilgiYonetim)
     private static final String hakedisZimmetListeXMLPath = "print/HAKEDISZIMMETLST.xml";
     private static final String ihracatciDavetMektup = "print/IHRACATCIDAVETMEKTUP.xml";
     private static final String ihracatciNakitOdemeMektubuPikurXMLPath = "print/IHRACATCINAKITODEMEMEKTUP.xml";
+
+
+ ---------------
+
+
+
+ handler
+
+
+ public interface LetterHandler {
+    UUID handleRequest(LetterRequestDto dto, String createdBy, String branchId);
+}
+
+
+
+@Component
+@RequiredArgsConstructor
+public class LetterHandlerFactory {
+
+    private final OdemeLetterHandler odemeLetterHandler;
+    private final HakedişLetterHandler hakedisLetterHandler;
+    private final DavetLetterHandler davetLetterHandler;
+
+    public LetterHandler getHandler(short requestTypeId) {
+        switch (requestTypeId) {
+            case 1: return odemeLetterHandler;
+            case 2: return hakedisLetterHandler;
+            case 3: return davetLetterHandler;
+            default: throw new IllegalArgumentException("Geçersiz mektup tipi: " + requestTypeId);
+        }
+    }
+}
+
+
+
+@Service
+@RequiredArgsConstructor
+public class OdemeLetterHandler implements LetterHandler {
+
+    private final LetterRequestRepository letterRequestRepo;
+    private final ApplicationEventPublisher eventPublisher;
+
+    @Override
+    public UUID handleRequest(LetterRequestDto dto, String createdBy, String branchId) {
+        validate(dto);
+
+        LetterRequest entity = mapDtoToEntity(dto, createdBy, branchId);
+        letterRequestRepo.save(entity);
+
+        // Event publish → asenkron mail için
+        eventPublisher.publishEvent(new LetterRequestCreatedEvent(entity.getId()));
+
+        return entity.getId();
+    }
+
+    private void validate(LetterRequestDto dto) {
+        if (dto.getFirstPaymentDate() == null || dto.getLastPaymentDate() == null) {
+            throw new IllegalArgumentException("İlk ve son ödeme tarihi zorunludur.");
+        }
+        if (dto.getFirstPaymentDate().isAfter(dto.getLastPaymentDate())) {
+            throw new IllegalArgumentException("İlk ödeme tarihi son ödeme tarihinden büyük olamaz.");
+        }
+		
+		
+		if (ilkOdemeTarih == null || sonOdemeTarih == null) {
+            throw new IllegalArgumentException("ilkOdemeTarih ve sonOdemeTarih zorunludur.");
+        }
+        if (sonOdemeTarih.isBefore(ilkOdemeTarih)) {
+            throw new IllegalArgumentException("sonOdemeTarih, ilkOdemeTarih'ten önce olamaz.");
+        }
+        if (mektupTip == null) {
+            throw new IllegalArgumentException("mektupTip zorunludur.");
+        }
+        if (StringUtils.isNotBlank(vkn) && StringUtils.isNotBlank(tckn)) {
+            throw new IllegalArgumentException("VKN ve TCKN aynı anda gönderilemez. Tekil işlemde birini gönderin.");
+        }
+    }
+
+    private LetterRequest mapDtoToEntity(LetterRequestDto dto, String createdBy, String branchId) {
+        LetterRequest entity = new LetterRequest();
+        entity.setRequestTypeId(dto.getRequestTypeId());
+        if (dto.getScopeValue() != null && !dto.getScopeValue().isBlank()) {
+            entity.setScopeId((short) 2); // SINGLE
+            entity.setScopeValue(dto.getScopeValue());
+        } else {
+            entity.setScopeId((short) 1); // BULK
+        }
+        entity.setFirstPaymentDate(dto.getFirstPaymentDate());
+        entity.setLastPaymentDate(dto.getLastPaymentDate());
+        entity.setTahakkukTuru(dto.getTahakkukTuru());
+        entity.setBelgeNo(dto.getBelgeNo());
+        entity.setYil(dto.getYil());
+        entity.setKararNoAdi(dto.getKararNoAdi());
+        entity.setFirmaVkn(dto.getFirmaVkn());
+        entity.setUreticiTckn(dto.getUreticiTckn());
+        entity.setIhracatciUnvan(dto.getIhracatciUnvan());
+        entity.setMektupTipiUi(dto.getMektupTipiUi());
+        entity.setStatusId((short) 3); // READY
+        entity.setCreatedBy(createdBy);
+        entity.setBranchId(branchId);
+        entity.setCreatedAt(OffsetDateTime.now());
+        entity.setUpdatedAt(OffsetDateTime.now());
+        entity.setNotifyEmails(dto.getNotifyEmails());
+        entity.setNotifySent(false);
+        return entity;
+    }
+}
+
+
+@Service
+public class HakedişLetterHandler implements LetterHandler {
+    @Override
+    public UUID handleRequest(LetterRequestDto dto, String createdBy, String branchId) {
+        // Şimdilik boş
+        throw new UnsupportedOperationException("Hakediş mektup işlemi henüz uygulanmadı.");
+    }
+}
+
+
+@Service
+public class DavetLetterHandler implements LetterHandler {
+    @Override
+    public UUID handleRequest(LetterRequestDto dto, String createdBy, String branchId) {
+        // Şimdilik boş
+        throw new UnsupportedOperationException("Davet mektup işlemi henüz uygulanmadı.");
+    }
+}
+
+
+
+@Service
+@RequiredArgsConstructor
+public class LetterRequestService {
+
+    private final LetterHandlerFactory handlerFactory;
+
+    public UUID createLetterRequest(LetterRequestDto dto, String createdBy, String branchId) {
+        LetterHandler handler = handlerFactory.getHandler(dto.getRequestTypeId());
+        return handler.handleRequest(dto, createdBy, branchId);
+    }
+}
+
+
+@Getter
+@AllArgsConstructor
+public class LetterRequestCreatedEvent {
+    private final UUID requestId;
+}
+
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class LetterNotificationEventListener {
+
+    private final LetterRequestRepository letterRequestRepo;
+    private final LetterNotificationLogRepository notificationLogRepo;
+    private final MailService mailService;
+
+    @Async
+    @EventListener
+    public void handleLetterRequestCreated(LetterRequestCreatedEvent event) {
+        letterRequestRepo.findById(event.getRequestId()).ifPresent(request -> {
+            try {
+                String body = buildMailBody(request);
+                String subject = "Yeni Mektup Talebi Kaydı";
+                String recipients = request.getNotifyEmails() != null ?
+                        request.getNotifyEmails() :
+                        request.getCreatedBy() + "@example.com";
+
+                mailService.sendMail(recipients, subject, body);
+
+                LetterNotificationLog logEntry = new LetterNotificationLog();
+                logEntry.setRequest(request);
+                logEntry.setToEmails(recipients);
+                logEntry.setSubject(subject);
+                logEntry.setStatus("SENT");
+                notificationLogRepo.save(logEntry);
+
+                request.setNotifySent(true);
+                request.setNotifySentAt(OffsetDateTime.now());
+                letterRequestRepo.save(request);
+
+            } catch (Exception e) {
+                log.error("Mail gönderiminde hata: {}", e.getMessage(), e);
+            }
+        });
+    }
+
+    private String buildMailBody(LetterRequest entity) {
+        return String.format(
+                "Sayın Yetkili,\n\n" +
+                "Aşağıdaki bilgilerle yeni bir mektup talebi kaydedilmiştir:\n" +
+                "Talep No: %s\n" +
+                "Mektup Tipi ID: %d\n" +
+                "Scope: %d (%s)\n" +
+                "İlk Ödeme Tarihi: %s\n" +
+                "Son Ödeme Tarihi: %s\n" +
+                "Talebi Yapan: %s (Şube: %s)\n" +
+                "Kayıt Tarihi: %s\n\n" +
+                "Bu talep, sistem jobu tarafından işlenecektir.\n\nSaygılarımızla,\nMektup Sistemi",
+                entity.getId(),
+                entity.getRequestTypeId(),
+                entity.getScopeId(),
+                entity.getScopeValue() != null ? entity.getScopeValue() : "BULK",
+                entity.getFirstPaymentDate(),
+                entity.getLastPaymentDate(),
+                entity.getCreatedBy(),
+                entity.getBranchId(),
+                entity.getCreatedAt()
+        );
+    }
+}
+
+
+@Entity
+@Table(name = "letter_notification_log")
+@Getter @Setter
+public class LetterNotificationLog {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "request_id")
+    private LetterRequest request;
+
+    @Column(name = "to_emails", nullable = false)
+    private String toEmails;
+
+    @Column(name = "subject")
+    private String subject;
+
+    @Column(name = "sent_at", nullable = false)
+    private OffsetDateTime sentAt = OffsetDateTime.now();
+
+    @Column(name = "provider_id")
+    private String providerId;
+
+    @Column(name = "status")
+    private String status;
+}
+
+
+@Data
+public class LetterRequestDto {
+    private Short requestTypeId; // 1: ODEME, 2: HAKEDIS, 3: DAVET
+    private String scopeValue; // VKN veya TCKN
+    private LocalDate firstPaymentDate;
+    private LocalDate lastPaymentDate;
+
+    private String tahakkukTuru;
+    private String belgeNo;
+    private Integer yil;
+    private String kararNoAdi;
+    private String firmaVkn;
+    private String ureticiTckn;
+    private String ihracatciUnvan;
+    private String mektupTipiUi;
+
+    private String notifyEmails;
+}
