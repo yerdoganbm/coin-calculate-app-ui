@@ -1284,3 +1284,73 @@ public class LetterRequestDto {
 
     private String notifyEmails;
 }
+
+
+
+sad// LetterRequest.java  (DDL’deki alan adlarıyla birebir)
+@Entity
+@Table(name = "letter_request")
+@Getter @Setter
+public class LetterRequest {
+    @Id
+    @GeneratedValue
+    private UUID id;
+
+    @Column(name="request_type_id", nullable=false)
+    private Short requestTypeId;
+
+    @Column(name="scope_id", nullable=false)
+    private Short scopeId;
+
+    @Column(name="scope_value")
+    private String scopeValue;
+
+    @Column(name="first_payment_date", nullable=false)
+    private LocalDate firstPaymentDate;
+
+    @Column(name="last_payment_date", nullable=false)
+    private LocalDate lastPaymentDate;
+
+    @Column(name="tahakkuk_turu")  private String tahakkukTuru;
+    @Column(name="belge_no")       private String belgeNo;
+    @Column(name="yil")            private Integer yil;
+    @Column(name="karar_no_adi")   private String kararNoAdi;
+    @Column(name="firma_vkn")      private String firmaVkn;
+    @Column(name="uretici_tckn")   private String ureticiTckn;
+    @Column(name="ihracatci_unvan") private String ihracatciUnvan;
+    @Column(name="mektup_tipi_ui")  private String mektupTipiUi;
+
+    @Column(name="status_id", nullable=false)
+    private Short statusId;
+
+    @Column(name="created_by", nullable=false)
+    private String createdBy;
+
+    @Column(name="branch_id", nullable=false)
+    private String branchId;
+
+    @Column(name="created_at", nullable=false)
+    private OffsetDateTime createdAt = OffsetDateTime.now();
+
+    @Column(name="updated_at", nullable=false)
+    private OffsetDateTime updatedAt = OffsetDateTime.now();
+
+    @Column(name="updater")       private String updater;
+    @Column(name="attempt_count", nullable=false) private Short attemptCount = 0;
+    @Column(name="last_attempt_at") private OffsetDateTime lastAttemptAt;
+    @Column(name="next_attempt_at") private OffsetDateTime nextAttemptAt;
+    @Column(name="processing_started_at")  private OffsetDateTime processingStartedAt;
+    @Column(name="processing_finished_at") private OffsetDateTime processingFinishedAt;
+    @Column(name="processing_duration_ms") private Integer processingDurationMs;
+    @Column(name="last_error_code")        private String lastErrorCode;
+    @Column(name="last_error_message")     private String lastErrorMessage;
+    @Column(name="notify_emails")          private String notifyEmails;
+    @Column(name="notify_sent", nullable=false) private Boolean notifySent = false;
+    @Column(name="notify_sent_at")         private OffsetDateTime notifySentAt;
+    @Column(name="notify_to_list")         private String notifyToList;
+}
+
+
+public interface LetterRequestRepository extends JpaRepository<LetterRequest, UUID> {
+    // enqueue sonrası işlemek için job kullanacak; şimdilik sadece kayıt tarafı lazım.
+}
