@@ -1354,3 +1354,52 @@ public class LetterRequest {
 public interface LetterRequestRepository extends JpaRepository<LetterRequest, UUID> {
     // enqueue sonrası işlemek için job kullanacak; şimdilik sadece kayıt tarafı lazım.
 }
+
+
+
+@PostMapping("/epostaGonder")
+    @ApiOperation(
+        value = "/epostaGonder",
+        httpMethod = "POST",
+        notes = "Kep adresi olan ihracatçılara davet,hakediş devir ve ödeme mektuplarını email olarak gönderir"
+    )
+    public ApiServiceResponse mektupEmailGonder(
+            @RequestParam(required = false) KararTipiEnum belgeTip,
+            @RequestParam(required = false) Integer belgeNo,
+            @RequestParam(required = false) Integer belgeYil,
+            @RequestParam(required = false) String kararNo,
+            @RequestParam @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate ilkOdemeTarih,
+            @RequestParam @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate sonOdemeTarih,
+            @RequestParam(required = false) String vkn,
+            @RequestParam(required = false) String tckn,
+            @RequestParam MektupTipEnum mektupTip
+    ) {
+        // DTO hazırlama
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setRequestTypeId(convertMektupTipToRequestTypeId(mektupTip));
+        dto.setFirstPaymentDate(ilkOdemeTarih);
+        dto.setLastPaymentDate(sonOdemeTarih);
+        dto.setTahakkukTuru(belgeTip != null ? belgeTip.name() : null);
+        dto.setBelgeNo(belgeNo != null ? belgeNo.toString() : null);
+        dto.setYil(belgeYil);
+        dto.setKararNoAdi(kararNo);
+        dto.setFirmaVkn(vkn);
+        dto.setUreticiTckn(tckn);
+        dto.setScopeValue(vkn != null ? vkn : tckn);
+
+        // Request kaydetme
+        UUID requestId = letterRequestService.createLetterRequest(dto, "system_user", "BR001");
+
+        return ApiServiceResponse.success(
+                String.format("Mektup talebi oluşturuldu. ID: %s", requestId)
+        );
+    }
+
+    private short convertMektupTipToRequestTypeId(MektupTipEnum tip) {
+        switch (tip) {
+            case ODEME: return 1;
+            case HAKEDIS_DEVIR: return 2;
+            case DAVET: return 3;
+            default: throw new IllegalArgumentException("Geçersiz mektup tipi: " + tip);
+        }
+    }
