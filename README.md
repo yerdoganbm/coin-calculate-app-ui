@@ -598,3 +598,22 @@ spring.jpa.hibernate.ddl-auto=none
 
 
 
+
+-- ref_letter_request_type
+MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (1, 'ODEME');
+MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (2, 'HAKEDIS_DEVIR');
+MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (3, 'DAVET');
+
+-- ref_letter_scope
+MERGE INTO ref_letter_scope (id, name) KEY(id) VALUES (1, 'BULK');
+MERGE INTO ref_letter_scope (id, name) KEY(id) VALUES (2, 'SINGLE');
+
+-- ref_letter_status
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (1, 'PENDING');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (2, 'VALIDATION_FAIL');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (3, 'READY');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (4, 'PROCESSING');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (5, 'PARTIAL_SENT');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (6, 'SENT');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (7, 'FAILED');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (8, 'CANCELLED');
