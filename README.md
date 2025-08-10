@@ -1,3 +1,185 @@
+package tr.gov.tcmb.ogmdfif.service.impl;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
+import tr.gov.tcmb.ogmdfif.repository.LetterAttemptRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterItemRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+import tr.gov.tcmb.ogmdfif.service.ItemSender;
+import tr.gov.tcmb.ogmdfif.service.RecipientProvider;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class LetterProcessingJob {
+
+    private static final int PICK_LIMIT = 20;   // her taramada max kaç request
+    private static final int MAX_RETRY = 3;    // item bazında
+
+    private final LetterRequestRepository requestRepo;
+    private final LetterItemRepository itemRepo;
+    private final LetterAttemptRepository attemptRepo;
+    private final RecipientProvider recipientProvider;
+    private final ItemSenderFactory itemSenderFactory;
+
+    @Scheduled(fixedDelayString = "PT1M") // her 1 dakikada bir
+    //@SchedulerLock(name = "letterProcessingJob", lockAtLeastFor = "PT20S", lockAtMostFor = "PT5M")
+    public void runBatch() {
+        List<LetterRequest> candidates = requestRepo.findReadyDue(PICK_LIMIT);
+        if (candidates.isEmpty()) {
+            log.debug("No READY requests to process.");
+            return;
+        }
+        log.info("Picked {} request(s) to process", candidates.size());
+
+        for (LetterRequest r : candidates) {
+            try {
+                processOneRequestSafe(r); // hiçbir request diğerini bloklamasın
+            } catch (Exception e) {
+                log.error("Unexpected error while processing request {}", r.getId(), e);
+
+            }
+            log.info("Processed {} request(s)", candidates.size());
+        }
+    }
+
+    private void processOneRequestSafe(LetterRequest r) {
+        try {
+            // PROCESSING'e çek (claim). idempotent: 0 dönerse başka worker almış demektir.
+            int updated = requestRepo.markProcessing(r.getId());
+            if (updated == 0) {
+                log.info("Request {} already claimed by another worker.", r.getId());
+                return;
+            }
+
+            long start = System.currentTimeMillis();
+
+            // 1) item üret (varsa atla)
+            ensureItemsExist(r);
+
+            // 2) item'ları işle (paralel & bağımsız)
+            List<LetterItem> items = itemRepo.findAllByRequestId(r.getId());
+            ItemSender sender = itemSenderFactory.forType(r.getRequestTypeId());
+
+            items.parallelStream().forEach(item -> {
+                // SENT/FAILED olmuş item’ı atla
+                if (item.getStatusId() != null && (item.getStatusId() == 6 || item.getStatusId() == 7)) return;
+                processOneItemWithRetry(r, item, sender);
+            });
+
+            // 3) request final durum
+            updateRequestFinalStatus(r.getId(), start);
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            log.error("Request {} fatal error", r.getId(), ex);
+            // kritik durumda bile request FAILED'a düşür (idempotent)
+            requestRepo.finishRequest(r.getId(), (short) 7, "REQUEST_FATAL", safeMsg(ex.getMessage()));
+        }
+    }
+
+    private void ensureItemsExist(LetterRequest r) {
+        List<String> receivers = recipientProvider.resolveReceiverKeys(r);
+        if (receivers == null || receivers.isEmpty()) {
+            // hiç alıcı yoksa: direkt FAILED
+            requestRepo.finishRequest(r.getId(), (short) 7, "NO_RECEIVER", "No receiver resolved.");
+            throw new IllegalStateException("No receiver resolved for request " + r.getId());
+        }
+        // idempotent insert
+        receivers.forEach(key ->
+                itemRepo.insertIfNotExists(r.getId(), key, null)
+        );
+    }
+
+    private void processOneItemWithRetry(LetterRequest req, LetterItem item, ItemSender sender) {
+        short currentAttempts = item.getAttemptCount() == null ? 0 : item.getAttemptCount();
+
+        for (short attemptNo = (short) (currentAttempts + 1); attemptNo <= MAX_RETRY; attemptNo++) {
+            OffsetDateTime started = OffsetDateTime.now();
+            long t0 = System.currentTimeMillis();
+            String errCode = null;
+            String errMsg = null;
+            String result = "SUCCESS";
+
+            try {
+                sender.sendOne(req, item.getReceiverKey()); // Exception → FAIL
+            } catch (UnsupportedOperationException ue) {
+                result = "FAIL";
+                errCode = "UNSUPPORTED";
+                errMsg = safeMsg(ue.getMessage());
+            } catch (Exception e) {
+                result = "FAIL";
+                errCode = e.getClass().getSimpleName();
+                errMsg = safeMsg(e.getMessage());
+            }
+
+            int duration = (int) (System.currentTimeMillis() - t0);
+            attemptRepo.insertAttempt(req.getId(), item.getId(), attemptNo, started, OffsetDateTime.now(), duration, result, errCode, errMsg);
+
+            if ("SUCCESS".equals(result)) {
+                // Item SENT
+                itemRepo.updateStatus(item.getId(), (short) 6, attemptNo, null, null);
+                return;
+            } else {
+                // Deneme başarısız → attempt sayısını güncelle
+                boolean lastTry = (attemptNo == MAX_RETRY);
+                if (lastTry) {
+                    itemRepo.updateStatus(item.getId(), (short) 7, attemptNo, errCode, errMsg); // FAILED
+                    return;
+                } else {
+                    // araya küçük bekleme istersen burada sleep koyabilirsin
+                    itemRepo.updateStatus(item.getId(), item.getStatusId() == null ? (short) 1 : item.getStatusId(), attemptNo, errCode, errMsg);
+                }
+            }
+        }
+    }
+
+    private void updateRequestFinalStatus(UUID requestId, long startMillis) {
+        long total = requestRepo.countAllItems(requestId);
+        long sent = requestRepo.countSent(requestId);
+        long fail = requestRepo.countFailed(requestId);
+
+        short status;
+        String code = null, msg = null;
+
+        if (total == 0) {
+            status = 7;
+            code = "NO_ITEMS";
+            msg = "No items were generated.";
+        } else if (sent == total) {
+            status = 6; // SENT
+        } else if (sent > 0 && fail > 0) {
+            status = 5;
+            code = "PARTIAL";
+            msg = String.format("%d/%d items failed", fail, total);
+        } else {
+            status = 7;
+            code = "ALL_FAILED";
+            msg = String.format("All %d items failed", total);
+        }
+
+        requestRepo.finishRequest(requestId, status, code, msg);
+        log.info("Request {} finished in {} ms → status={}, sent={}/{}", requestId,
+                (System.currentTimeMillis() - startMillis), status, sent, total);
+    }
+
+    private String safeMsg(String s) {
+        if (s == null) return null;
+        return s.length() > 4000 ? s.substring(0, 4000) : s;
+    }
+}
+
 
 
 
