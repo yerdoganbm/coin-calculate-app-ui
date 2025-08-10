@@ -1848,3 +1848,30 @@ public class LetterAttempt {
     private String errorMessage;
 }
 
+-- Ana letter_attempt tablosu (partition root)
+CREATE TABLE letter_attempt (
+    id              BIGSERIAL PRIMARY KEY,
+    request_id      UUID NOT NULL REFERENCES letter_request(id) ON DELETE CASCADE,
+    item_id         BIGINT REFERENCES letter_item(id) ON DELETE CASCADE,
+    attempt_no      SMALLINT NOT NULL,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ,
+    duration_ms     INTEGER,
+    result          VARCHAR(20) NOT NULL, -- SUCCESS / FAIL
+    error_code      VARCHAR(64),
+    error_message   TEXT
+) PARTITION BY RANGE (started_at);
+
+-- Örnek ilk partisyon (Ağustos 2025)
+CREATE TABLE letter_attempt_2025_08 PARTITION OF letter_attempt
+FOR VALUES FROM ('2025-08-01') TO ('2025-09-01');
+
+-- Indexler (partisyon bazında oluşturulmalı)
+CREATE INDEX idx_letter_attempt_2025_08_req
+    ON letter_attempt_2025_08 (request_id);
+
+CREATE INDEX idx_letter_attempt_2025_08_item
+    ON letter_attempt_2025_08 (item_id);
+
+CREATE INDEX idx_letter_attempt_2025_08_start
+    ON letter_attempt_2025_08 (started_at);
