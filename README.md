@@ -1860,18 +1860,10 @@ CREATE TABLE letter_attempt (
     result          VARCHAR(20) NOT NULL, -- SUCCESS / FAIL
     error_code      VARCHAR(64),
     error_message   TEXT
-) PARTITION BY RANGE (started_at);
+);
 
--- Örnek ilk partisyon (Ağustos 2025)
-CREATE TABLE letter_attempt_2025_08 PARTITION OF letter_attempt
-FOR VALUES FROM ('2025-08-01') TO ('2025-09-01');
+-- Performans için indexler
+CREATE INDEX idx_letter_attempt_req ON letter_attempt (request_id);
+CREATE INDEX idx_letter_attempt_item ON letter_attempt (item_id);
+CREATE INDEX idx_letter_attempt_start ON letter_attempt (started_at);
 
--- Indexler (partisyon bazında oluşturulmalı)
-CREATE INDEX idx_letter_attempt_2025_08_req
-    ON letter_attempt_2025_08 (request_id);
-
-CREATE INDEX idx_letter_attempt_2025_08_item
-    ON letter_attempt_2025_08 (item_id);
-
-CREATE INDEX idx_letter_attempt_2025_08_start
-    ON letter_attempt_2025_08 (started_at);
