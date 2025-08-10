@@ -1,42 +1,21 @@
-package tr.gov.tcmb.ogmdfif.service.impl;
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
-import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
-import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
-import tr.gov.tcmb.ogmdfif.repository.LetterAttemptRepository;
-import tr.gov.tcmb.ogmdfif.repository.LetterItemRepository;
-import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
-import tr.gov.tcmb.ogmdfif.service.ItemSender;
-import tr.gov.tcmb.ogmdfif.service.RecipientProvider;
 
-import java.time.OffsetDateTime;
-import java.util.List;
-import java.util.UUID;
-
+@Slf4j
 @Service
 @RequiredArgsConstructor
-@Slf4j
 public class LetterProcessingJob {
 
-    private static final int PICK_LIMIT = 20;   // her taramada max kaç request
-    private static final int MAX_RETRY = 3;    // item bazında
+    private static final int PICK_LIMIT = 20;
+    private static final int MAX_RETRY = 3;
 
-    private final LetterRequestRepository requestRepo;
-    private final LetterItemRepository itemRepo;
-    private final LetterAttemptRepository attemptRepo;
+    private final LetterJobTxService txService;
     private final RecipientProvider recipientProvider;
     private final ItemSenderFactory itemSenderFactory;
 
-    @Scheduled(fixedDelayString = "PT1M") // her 1 dakikada bir
+    @Scheduled(fixedDelayString = "PT1M") // 1 dakika
     //@SchedulerLock(name = "letterProcessingJob", lockAtLeastFor = "PT20S", lockAtMostFor = "PT5M")
     public void runBatch() {
-        List<LetterRequest> candidates = requestRepo.findReadyDue(PICK_LIMIT);
+        List<LetterRequest> candidates = txService.findReadyDue(PICK_LIMIT);
         if (candidates.isEmpty()) {
             log.debug("No READY requests to process.");
             return;
@@ -45,61 +24,40 @@ public class LetterProcessingJob {
 
         for (LetterRequest r : candidates) {
             try {
-                processOneRequestSafe(r); // hiçbir request diğerini bloklamasın
+                processOneRequestSafe(r);
             } catch (Exception e) {
                 log.error("Unexpected error while processing request {}", r.getId(), e);
-
             }
-            log.info("Processed {} request(s)", candidates.size());
         }
     }
 
     private void processOneRequestSafe(LetterRequest r) {
-        try {
-            // PROCESSING'e çek (claim). idempotent: 0 dönerse başka worker almış demektir.
-            int updated = requestRepo.markProcessing(r.getId());
-            if (updated == 0) {
-                log.info("Request {} already claimed by another worker.", r.getId());
-                return;
-            }
-
-            long start = System.currentTimeMillis();
-
-            // 1) item üret (varsa atla)
-            ensureItemsExist(r);
-
-            // 2) item'ları işle (paralel & bağımsız)
-            List<LetterItem> items = itemRepo.findAllByRequestId(r.getId());
-            ItemSender sender = itemSenderFactory.forType(r.getRequestTypeId());
-
-            items.parallelStream().forEach(item -> {
-                // SENT/FAILED olmuş item’ı atla
-                if (item.getStatusId() != null && (item.getStatusId() == 6 || item.getStatusId() == 7)) return;
-                processOneItemWithRetry(r, item, sender);
-            });
-
-            // 3) request final durum
-            updateRequestFinalStatus(r.getId(), start);
-
-        } catch (Exception ex) {
-            ex.printStackTrace();
-            log.error("Request {} fatal error", r.getId(), ex);
-            // kritik durumda bile request FAILED'a düşür (idempotent)
-            requestRepo.finishRequest(r.getId(), (short) 7, "REQUEST_FATAL", safeMsg(ex.getMessage()));
+        if (!txService.claimRequest(r.getId())) {
+            log.info("Request {} already claimed by another worker.", r.getId());
+            return;
         }
-    }
 
-    private void ensureItemsExist(LetterRequest r) {
+        long start = System.currentTimeMillis();
+
+        // Item oluşturma
         List<String> receivers = recipientProvider.resolveReceiverKeys(r);
         if (receivers == null || receivers.isEmpty()) {
-            // hiç alıcı yoksa: direkt FAILED
-            requestRepo.finishRequest(r.getId(), (short) 7, "NO_RECEIVER", "No receiver resolved.");
-            throw new IllegalStateException("No receiver resolved for request " + r.getId());
+            txService.finishRequest(r.getId(), (short) 7, "NO_RECEIVER", "No receiver resolved.");
+            return;
         }
-        // idempotent insert
-        receivers.forEach(key ->
-                itemRepo.insertIfNotExists(r.getId(), key, null)
-        );
+        receivers.forEach(key -> txService.insertItemIfNotExists(r.getId(), key));
+
+        // Item'ları gönder
+        List<LetterItem> items = txService.getItems(r.getId());
+        ItemSender sender = itemSenderFactory.forType(r.getRequestTypeId());
+
+        items.parallelStream().forEach(item -> {
+            if (item.getStatusId() != null && (item.getStatusId() == 6 || item.getStatusId() == 7)) return;
+            processOneItemWithRetry(r, item, sender);
+        });
+
+        // Request final durum
+        updateRequestFinalStatus(r.getId(), start);
     }
 
     private void processOneItemWithRetry(LetterRequest req, LetterItem item, ItemSender sender) {
@@ -108,16 +66,11 @@ public class LetterProcessingJob {
         for (short attemptNo = (short) (currentAttempts + 1); attemptNo <= MAX_RETRY; attemptNo++) {
             OffsetDateTime started = OffsetDateTime.now();
             long t0 = System.currentTimeMillis();
-            String errCode = null;
-            String errMsg = null;
+            String errCode = null, errMsg = null;
             String result = "SUCCESS";
 
             try {
-                sender.sendOne(req, item.getReceiverKey()); // Exception → FAIL
-            } catch (UnsupportedOperationException ue) {
-                result = "FAIL";
-                errCode = "UNSUPPORTED";
-                errMsg = safeMsg(ue.getMessage());
+                sender.sendOne(req, item.getReceiverKey());
             } catch (Exception e) {
                 result = "FAIL";
                 errCode = e.getClass().getSimpleName();
@@ -125,30 +78,27 @@ public class LetterProcessingJob {
             }
 
             int duration = (int) (System.currentTimeMillis() - t0);
-            attemptRepo.insertAttempt(req.getId(), item.getId(), attemptNo, started, OffsetDateTime.now(), duration, result, errCode, errMsg);
+            txService.logAttempt(req.getId(), item.getId(), attemptNo, started, OffsetDateTime.now(), duration, result, errCode, errMsg);
 
             if ("SUCCESS".equals(result)) {
-                // Item SENT
-                itemRepo.updateStatus(item.getId(), (short) 6, attemptNo, null, null);
+                txService.updateItemStatus(item.getId(), (short) 6, attemptNo, null, null);
                 return;
             } else {
-                // Deneme başarısız → attempt sayısını güncelle
                 boolean lastTry = (attemptNo == MAX_RETRY);
                 if (lastTry) {
-                    itemRepo.updateStatus(item.getId(), (short) 7, attemptNo, errCode, errMsg); // FAILED
+                    txService.updateItemStatus(item.getId(), (short) 7, attemptNo, errCode, errMsg);
                     return;
                 } else {
-                    // araya küçük bekleme istersen burada sleep koyabilirsin
-                    itemRepo.updateStatus(item.getId(), item.getStatusId() == null ? (short) 1 : item.getStatusId(), attemptNo, errCode, errMsg);
+                    txService.updateItemStatus(item.getId(), item.getStatusId() == null ? (short) 1 : item.getStatusId(), attemptNo, errCode, errMsg);
                 }
             }
         }
     }
 
     private void updateRequestFinalStatus(UUID requestId, long startMillis) {
-        long total = requestRepo.countAllItems(requestId);
-        long sent = requestRepo.countSent(requestId);
-        long fail = requestRepo.countFailed(requestId);
+        long total = txService.countAllItems(requestId);
+        long sent = txService.countSentItems(requestId);
+        long fail = txService.countFailedItems(requestId);
 
         short status;
         String code = null, msg = null;
@@ -169,7 +119,7 @@ public class LetterProcessingJob {
             msg = String.format("All %d items failed", total);
         }
 
-        requestRepo.finishRequest(requestId, status, code, msg);
+        txService.finishRequest(requestId, status, code, msg);
         log.info("Request {} finished in {} ms → status={}, sent={}/{}", requestId,
                 (System.currentTimeMillis() - startMillis), status, sent, total);
     }
@@ -180,6 +130,66 @@ public class LetterProcessingJob {
     }
 }
 
+@Service
+@RequiredArgsConstructor
+public class LetterJobTxService {
+
+    private final LetterRequestRepository requestRepo;
+    private final LetterItemRepository itemRepo;
+    private final LetterAttemptRepository attemptRepo;
+
+    @Transactional(readOnly = true)
+    public List<LetterRequest> findReadyDue(int limit) {
+        return requestRepo.findReadyDue(limit);
+    }
+
+    @Transactional
+    public boolean claimRequest(UUID requestId) {
+        return requestRepo.markProcessing(requestId) > 0;
+    }
+
+    @Transactional
+    public void insertItemIfNotExists(UUID requestId, String receiverKey) {
+        itemRepo.insertIfNotExists(requestId, receiverKey, null);
+    }
+
+    @Transactional
+    public List<LetterItem> getItems(UUID requestId) {
+        return itemRepo.findAllByRequestId(requestId);
+    }
+
+    @Transactional
+    public void updateItemStatus(Long itemId, short statusId, short attemptCount, String errorCode, String errorMessage) {
+        itemRepo.updateStatus(itemId, statusId, attemptCount, errorCode, errorMessage);
+    }
+
+    @Transactional
+    public void logAttempt(UUID requestId, Long itemId, short attemptNo,
+                           OffsetDateTime startedAt, OffsetDateTime finishedAt, int durationMs,
+                           String result, String errorCode, String errorMessage) {
+        attemptRepo.insertAttempt(requestId, itemId, attemptNo, startedAt, finishedAt, durationMs, result, errorCode, errorMessage);
+    }
+
+    @Transactional
+    public void finishRequest(UUID requestId, short statusId, String errorCode, String errorMessage) {
+        requestRepo.finishRequest(requestId, statusId, errorCode, errorMessage);
+    }
+
+    @Transactional(readOnly = true)
+    public long countAllItems(UUID requestId) {
+        return requestRepo.countAllItems(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public long countSentItems(UUID requestId) {
+        return requestRepo.countSent(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public long countFailedItems(UUID requestId) {
+        return requestRepo.countFailed(requestId);
+    }
+}
 
 
 
