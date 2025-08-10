@@ -1,3 +1,76 @@
+CREATE TABLE letter_item (
+    id                  BIGSERIAL PRIMARY KEY,
+    request_id          UUID NOT NULL REFERENCES letter_request(id) ON DELETE CASCADE,
+    receiver_key        VARCHAR(64) NOT NULL,
+    payload_ref         VARCHAR(200),
+    status_id           SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    attempt_count       SMALLINT NOT NULL DEFAULT 0,
+    last_error_code     VARCHAR(64),
+    last_error_message  TEXT,
+    sent_at             TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Performans indexleri
+CREATE INDEX idx_letter_item_req_status ON letter_item (request_id, status_id);
+CREATE INDEX idx_letter_item_req ON letter_item (request_id);
+
+
+
+
+
+@Entity
+@Table(name = "letter_item")
+@Getter
+@Setter
+public class LetterItem {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "request_id", nullable = false)
+    private UUID requestId;
+
+    @Column(name = "receiver_key", nullable = false)
+    private String receiverKey;
+
+    @Column(name = "payload_ref")
+    private String payloadRef;
+
+    @Column(name = "status_id", nullable = false)
+    private Short statusId;
+
+    @Column(name = "attempt_count", nullable = false)
+    private Short attemptCount = 0;
+
+    @Column(name = "last_error_code")
+    private String lastErrorCode;
+
+    @Column(name = "last_error_message")
+    private String lastErrorMessage;
+
+    @Column(name = "sent_at")
+    private OffsetDateTime sentAt;
+
+    @Column(name = "created_at", nullable = false)
+    private OffsetDateTime createdAt = OffsetDateTime.now();
+
+    @Column(name = "updated_at", nullable = false)
+    private OffsetDateTime updatedAt = OffsetDateTime.now();
+}
+
+
+
+
+
+
+
+
+
+
+
 # coin-calculate-app-ui
 
 
