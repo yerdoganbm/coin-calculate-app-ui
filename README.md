@@ -1403,3 +1403,402 @@ public interface LetterRequestRepository extends JpaRepository<LetterRequest, UU
             default: throw new IllegalArgumentException("Geçersiz mektup tipi: " + tip);
         }
     }
+
+
+---yunus
+
+
+@Repository
+public interface LetterAttemptRepository extends JpaRepository<LetterAttempt, Long> {
+
+    /**
+     * Her deneme ayrı log olarak saklanır.
+     */
+    @Modifying
+    @Query(value = """
+        INSERT INTO letter_attempt(
+            request_id, item_id, attempt_no, 
+            started_at, finished_at, duration_ms, 
+            result, error_code, error_message
+        )
+        VALUES (
+            :requestId, :itemId, :attemptNo,
+            :startedAt, :finishedAt, :durationMs,
+            :result, :errorCode, :errorMessage
+        )
+    """, nativeQuery = true)
+    void insertAttempt(@Param("requestId") UUID requestId,
+                       @Param("itemId") Long itemId,
+                       @Param("attemptNo") short attemptNo,
+                       @Param("startedAt") OffsetDateTime startedAt,
+                       @Param("finishedAt") OffsetDateTime finishedAt,
+                       @Param("durationMs") int durationMs,
+                       @Param("result") String result,
+                       @Param("errorCode") String errorCode,
+                       @Param("errorMessage") String errorMessage);
+}
+
+
+
+
+
+
+@Repository
+public interface LetterItemRepository extends JpaRepository<LetterItem, Long> {
+
+    @Query(value = """
+        SELECT * 
+          FROM letter_item 
+         WHERE request_id = :requestId
+    """, nativeQuery = true)
+    List<LetterItem> findAllByRequestId(@Param("requestId") UUID requestId);
+
+    /**
+     * Aynı item varsa eklemeyecek.
+     */
+    @Modifying
+    @Query(value = """
+        INSERT INTO letter_item(request_id, receiver_key, payload_ref, status_id, attempt_count, created_at, updated_at)
+        VALUES (:requestId, :receiverKey, :payloadRef, 1, 0, now(), now())
+        ON CONFLICT DO NOTHING
+    """, nativeQuery = true)
+    void insertIfNotExists(@Param("requestId") UUID requestId,
+                           @Param("receiverKey") String receiverKey,
+                           @Param("payloadRef") String payloadRef);
+
+    /**
+     * Item statüsünü ve hata bilgilerini günceller.
+     * status_id = 6 ise sent_at otomatik olarak set edilir.
+     */
+    @Modifying
+    @Query(value = """
+        UPDATE letter_item
+           SET status_id = :statusId,
+               attempt_count = :attemptCount,
+               last_error_code = :errorCode,
+               last_error_message = :errorMessage,
+               sent_at = CASE WHEN :statusId = 6 THEN now() ELSE sent_at END,
+               updated_at = now()
+         WHERE id = :itemId
+    """, nativeQuery = true)
+    int updateStatus(@Param("itemId") Long itemId,
+                     @Param("statusId") short statusId,
+                     @Param("attemptCount") short attemptCount,
+                     @Param("errorCode") String errorCode,
+                     @Param("errorMessage") String errorMessage);
+}
+----
+
+
+
+
+
+@Repository
+public interface LetterRequestRepository extends JpaRepository<LetterRequest, UUID> {
+
+    /**
+     * READY (3) ve zamanı gelmiş talepleri getirir.
+     * LIMIT ile küçük batch’ler halinde çalışır.
+     */
+    @Query(value = """
+        SELECT r.* 
+          FROM letter_request r
+         WHERE r.status_id = 3
+           AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now())
+         ORDER BY r.created_at ASC
+         LIMIT :limit
+    """, nativeQuery = true)
+    List<LetterRequest> findReadyDue(@Param("limit") int limit);
+
+    /**
+     * Talebi PROCESSING (4) statüsüne çeker.
+     * Aynı anda başka bir job claim etmesin diye status_id in (3,4) şartı var.
+     */
+    @Modifying
+    @Query(value = """
+        UPDATE letter_request
+           SET status_id = 4,
+               processing_started_at = now(),
+               updated_at = now(),
+               attempt_count = attempt_count + 1,
+               last_attempt_at = now()
+         WHERE id = :id
+           AND status_id IN (3,4)
+    """, nativeQuery = true)
+    int markProcessing(@Param("id") UUID id);
+
+    /**
+     * Talebi işlem sonunda bitirir. Status_id ve hata bilgilerini günceller.
+     */
+    @Modifying
+    @Query(value = """
+        UPDATE letter_request
+           SET status_id = :statusId,
+               processing_finished_at = now(),
+               processing_duration_ms = EXTRACT(EPOCH FROM (now() - COALESCE(processing_started_at, now()))) * 1000,
+               updated_at = now(),
+               last_error_code = :errorCode,
+               last_error_message = :errorMessage
+         WHERE id = :id
+    """, nativeQuery = true)
+    int finishRequest(@Param("id") UUID id,
+                      @Param("statusId") short statusId,
+                      @Param("errorCode") String errorCode,
+                      @Param("errorMessage") String errorMessage);
+
+    /**
+     * İlgili request’te gönderilmiş item sayısı
+     */
+    @Query(value = """
+        SELECT COUNT(*) 
+          FROM letter_item i 
+         WHERE i.request_id = :requestId 
+           AND i.status_id = 6
+    """, nativeQuery = true)
+    long countSent(@Param("requestId") UUID requestId);
+
+    /**
+     * İlgili request’te başarısız item sayısı
+     */
+    @Query(value = """
+        SELECT COUNT(*) 
+          FROM letter_item i 
+         WHERE i.request_id = :requestId 
+           AND i.status_id = 7
+    """, nativeQuery = true)
+    long countFailed(@Param("requestId") UUID requestId);
+
+    /**
+     * İlgili request’teki toplam item sayısı
+     */
+    @Query(value = """
+        SELECT COUNT(*) 
+          FROM letter_item i 
+         WHERE i.request_id = :requestId
+    """, nativeQuery = true)
+    long countAllItems(@Param("requestId") UUID requestId);
+}
+
+
+-------------
+
+public interface RecipientProvider {
+    /**
+     * Request'e göre receiver_key listesi döner.
+     * SINGLE ise scope_value tek key’dir.
+     * BULK ise arka sistemden sorgu ile N key üretmelidir.
+     */
+    List<String> resolveReceiverKeys(LetterRequest request);
+}
+
+@Service
+public class DefaultRecipientProvider implements RecipientProvider {
+    @Override
+    public List<String> resolveReceiverKeys(LetterRequest r) {
+        // SINGLE
+        if (r.getScopeId() != null && r.getScopeId() == 2 && r.getScopeValue() != null) {
+            return List.of(r.getScopeValue());
+        }
+        // BULK – burada gerçek sisteminden (provizyon vb.) filtre ile al
+        // Şimdilik demo için sahte 3 kayıt:
+        return List.of("VKN_1111111111", "VKN_2222222222", "VKN_3333333333");
+    }
+}
+
+
+
+
+
+
+public interface ItemSender {
+    /** Tek bir receiver için mektup gönderir. Başarısızlıkta Exception fırlatır. */
+    void sendOne(LetterRequest req, String receiverKey) throws Exception;
+}
+
+@Service
+public class OdemeItemSender implements ItemSender {
+    @Override
+    public void sendOne(LetterRequest req, String receiverKey) throws Exception {
+        // Burada senin ödeme mektubu üretim + pdf + mail gönderim akışın çalışır.
+        // Örnek demo:
+        if (receiverKey.contains("2222")) {
+            throw new RuntimeException("SMTP_421 Temporary failure"); // demo fail
+        }
+        // başarılı → hiçbir şey yapma (exception yok = success)
+    }
+}
+
+@Service
+public class UnsupportedItemSender implements ItemSender {
+    @Override public void sendOne(LetterRequest req, String receiverKey) throws Exception {
+        throw new UnsupportedOperationException("UNSUPPORTED_REQUEST_TYPE");
+    }
+}
+
+@Service
+public class ItemSenderFactory {
+    private final OdemeItemSender odeme;
+    private final UnsupportedItemSender unsupported;
+
+    public ItemSenderFactory(OdemeItemSender odeme, UnsupportedItemSender unsupported) {
+        this.odeme = odeme;
+        this.unsupported = unsupported;
+    }
+    public ItemSender forType(short requestTypeId) {
+        if (requestTypeId == 1) return odeme; // ODEME
+        // 2/3 henüz boş ise unsupported
+        return unsupported;
+    }
+}
+
+
+------------
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class LetterProcessingJob {
+
+    private static final int PICK_LIMIT = 20;   // her taramada max kaç request
+    private static final int MAX_RETRY  = 3;    // item bazında
+
+    private final LetterRequestRepository requestRepo;
+    private final LetterItemRepository itemRepo;
+    private final LetterAttemptRepository attemptRepo;
+    private final RecipientProvider recipientProvider;
+    private final ItemSenderFactory itemSenderFactory;
+
+    @Scheduled(fixedDelayString = "PT1M") // her 1 dakikada bir
+    @SchedulerLock(name = "letterProcessingJob", lockAtLeastFor = "PT20S", lockAtMostFor = "PT5M")
+    public void runBatch() {
+        try {
+            List<LetterRequest> candidates = requestRepo.findReadyDue(PICK_LIMIT);
+            if (candidates.isEmpty()) {
+                log.debug("No READY requests to process.");
+                return;
+            }
+            log.info("Picked {} request(s) to process", candidates.size());
+
+            for (LetterRequest r : candidates) {
+                processOneRequestSafe(r); // hiçbir request diğerini bloklamasın
+            }
+        } catch (Exception e) {
+            log.error("Batch error", e);
+        }
+    }
+
+    private void processOneRequestSafe(LetterRequest r) {
+        try {
+            // PROCESSING'e çek (claim). idempotent: 0 dönerse başka worker almış demektir.
+            int updated = requestRepo.markProcessing(r.getId());
+            if (updated == 0) {
+                log.info("Request {} already claimed by another worker.", r.getId());
+                return;
+            }
+
+            long start = System.currentTimeMillis();
+
+            // 1) item üret (varsa atla)
+            ensureItemsExist(r);
+
+            // 2) item'ları işle (paralel & bağımsız)
+            List<LetterItem> items = itemRepo.findAllByRequestId(r.getId());
+            ItemSender sender = itemSenderFactory.forType(r.getRequestTypeId());
+
+            items.parallelStream().forEach(item -> {
+                // SENT/FAILED olmuş item’ı atla
+                if (item.getStatusId() != null && (item.getStatusId() == 6 || item.getStatusId() == 7)) return;
+                processOneItemWithRetry(r, item, sender);
+            });
+
+            // 3) request final durum
+            updateRequestFinalStatus(r.getId(), start);
+
+        } catch (Exception ex) {
+            log.error("Request {} fatal error", r.getId(), ex);
+            // kritik durumda bile request FAILED'a düşür (idempotent)
+            requestRepo.finishRequest(r.getId(), (short)7, "REQUEST_FATAL", safeMsg(ex.getMessage()));
+        }
+    }
+
+    private void ensureItemsExist(LetterRequest r) {
+        List<String> receivers = recipientProvider.resolveReceiverKeys(r);
+        if (receivers == null || receivers.isEmpty()) {
+            // hiç alıcı yoksa: direkt FAILED
+            requestRepo.finishRequest(r.getId(), (short)7, "NO_RECEIVER", "No receiver resolved.");
+            throw new IllegalStateException("No receiver resolved for request " + r.getId());
+        }
+        // idempotent insert
+        receivers.forEach(key ->
+            itemRepo.insertIfNotExists(r.getId(), key, null)
+        );
+    }
+
+    private void processOneItemWithRetry(LetterRequest req, LetterItem item, ItemSender sender) {
+        short currentAttempts = item.getAttemptCount() == null ? 0 : item.getAttemptCount();
+
+        for (short attemptNo = (short)(currentAttempts + 1); attemptNo <= MAX_RETRY; attemptNo++) {
+            OffsetDateTime started = OffsetDateTime.now();
+            long t0 = System.currentTimeMillis();
+            String errCode = null; String errMsg = null; String result = "SUCCESS";
+
+            try {
+                sender.sendOne(req, item.getReceiverKey()); // Exception → FAIL
+            } catch (UnsupportedOperationException ue) {
+                result = "FAIL";
+                errCode = "UNSUPPORTED";
+                errMsg  = safeMsg(ue.getMessage());
+            } catch (Exception e) {
+                result = "FAIL";
+                errCode = e.getClass().getSimpleName();
+                errMsg  = safeMsg(e.getMessage());
+            }
+
+            int duration = (int)(System.currentTimeMillis() - t0);
+            attemptRepo.insertAttempt(req.getId(), item.getId(), attemptNo, started, OffsetDateTime.now(), duration, result, errCode, errMsg);
+
+            if ("SUCCESS".equals(result)) {
+                // Item SENT
+                itemRepo.updateStatus(item.getId(), (short)6, attemptNo, null, null);
+                return;
+            } else {
+                // Deneme başarısız → attempt sayısını güncelle
+                boolean lastTry = (attemptNo == MAX_RETRY);
+                if (lastTry) {
+                    itemRepo.updateStatus(item.getId(), (short)7, attemptNo, errCode, errMsg); // FAILED
+                    return;
+                } else {
+                    // araya küçük bekleme istersen burada sleep koyabilirsin
+                    itemRepo.updateStatus(item.getId(), item.getStatusId() == null ? (short)1 : item.getStatusId(), attemptNo, errCode, errMsg);
+                }
+            }
+        }
+    }
+
+    private void updateRequestFinalStatus(UUID requestId, long startMillis) {
+        long total = requestRepo.countAllItems(requestId);
+        long sent  = requestRepo.countSent(requestId);
+        long fail  = requestRepo.countFailed(requestId);
+
+        short status;
+        String code = null, msg = null;
+
+        if (total == 0) {
+            status = 7; code = "NO_ITEMS"; msg = "No items were generated.";
+        } else if (sent == total) {
+            status = 6; // SENT
+        } else if (sent > 0 && fail > 0) {
+            status = 5; code = "PARTIAL"; msg = String.format("%d/%d items failed", fail, total);
+        } else {
+            status = 7; code = "ALL_FAILED"; msg = String.format("All %d items failed", total);
+        }
+
+        requestRepo.finishRequest(requestId, status, code, msg);
+        log.info("Request {} finished in {} ms → status={}, sent={}/{}", requestId,
+                (System.currentTimeMillis() - startMillis), status, sent, total);
+    }
+
+    private String safeMsg(String s) {
+        if (s == null) return null;
+        return s.length() > 4000 ? s.substring(0, 4000) : s;
+    }
+}
