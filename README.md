@@ -1802,3 +1802,49 @@ public class LetterProcessingJob {
         return s.length() > 4000 ? s.substring(0, 4000) : s;
     }
 }
+
+
+@Entity
+@Table(name = "letter_attempt")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class LetterAttempt {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "request_id", nullable = false)
+    private UUID requestId;
+
+    @Column(name = "item_id")
+    private Long itemId;
+
+    @Column(name = "attempt_no", nullable = false)
+    private Short attemptNo;
+
+    @Column(name = "started_at", nullable = false)
+    private OffsetDateTime startedAt;
+
+    @Column(name = "finished_at")
+    private OffsetDateTime finishedAt;
+
+    @Column(name = "duration_ms")
+    private Integer durationMs;
+
+    /**
+     * SUCCESS / FAIL
+     */
+    @Column(name = "result", nullable = false, length = 20)
+    private String result;
+
+    @Column(name = "error_code", length = 64)
+    private String errorCode;
+
+    @Column(name = "error_message")
+    private String errorMessage;
+}
+
