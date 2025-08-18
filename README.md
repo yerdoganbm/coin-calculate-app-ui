@@ -1,9 +1,3 @@
-
-
-
-
-
-
 /* eslint-disable react/no-is-mounted */
 /**
  *
@@ -22,7 +16,7 @@ import { compose } from 'redux';
 import { toast } from 'react-toastify';
 
 import { createStructuredSelector } from 'reselect';
-import { Form,DataTable, Button, Segment, Grid, Modal, List } from 'tcmb-ui-components';
+import { Form, DataTable, Button, Segment, Grid, Modal, List } from 'tcmb-ui-components';
 
 import reducer from './redux/reducer';
 import saga, { mektupTalepSearch } from './redux/saga';
@@ -32,15 +26,14 @@ import makeSelectOdemeMektuplari from './redux/selectors';
 import DropdownKararNo from '../../components/DropdownKararNo';
 import DropdownIhracatci from '../../components/DropdownIhracatci';
 
-
 import { MektupDetayColumns, MektupMainColumns } from './columns';
 
 /* eslint-disable react/prefer-stateless-function */
 const TRAN_STATES = {
   IDLE: 'IDLE',
   WARNING_CHECK: 'WARNING_CHECK',
-  TRAN_PROCESS: 'TRAN_PROCESS',
 };
+
 export class OdemeMektuplari extends React.Component {
   constructor(props) {
     super(props);
@@ -55,25 +48,139 @@ export class OdemeMektuplari extends React.Component {
       searchVkn: '',
       searchTckn: '',
       searchMektupTip: '',
-      submitType: '',
       clearKararNo: false,
       tranState: TRAN_STATES.IDLE,
       clearIhracatciAdi: false,
+      onConfirm: null, // modal onaylandığında çalıştırılacak aksiyon
+      selectedRows: [],
+      selectedTaleps: new Set(),
     };
   }
 
-  handleIhracatciSelect = ihracatciAdi => {
-    // İhracatçı adından VKN veya TCKN'yi çıkarıyoruz.
-    const ihracatciBilgisi = ihracatciAdi.split(' - ');
-    const ihracatciKodu = ihracatciBilgisi[0].trim();
+  // --- helpers ---
+
+  handleIhracatciSelect = (ihracatciAdi) => {
+    // "1234567890 - Foo A.Ş." -> "1234567890"
+    const ihracatciKodu = (ihracatciAdi.split(' - ')[0] || '').trim();
     if (ihracatciKodu.length === 10) {
-      this.setState({ searchVkn: ihracatciKodu });
-      this.setState({ searchTckn: '' });
+      this.setState({ searchVkn: ihracatciKodu, searchTckn: '' });
     } else if (ihracatciKodu.length === 11) {
-      this.setState({ searchTckn: ihracatciKodu });
-      this.setState({ searchVkn: '' });
+      this.setState({ searchTckn: ihracatciKodu, searchVkn: '' });
+    } else {
+      this.setState({ searchTckn: '', searchVkn: '' });
     }
   };
+
+  formatDate = (d) => (d && d.format ? d.format('YYYY-MM-DD') : '');
+
+  // --- actions ---
+
+  mektupTalepSearchFunc = () => {
+    this.props.dispatch(
+      mektupTalepSearch(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  mektupEpostaGonderFunc = () => {
+    this.props.dispatch(
+      mektupEpostaGonder(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  mektupYazdirFields = () => {
+    this.props.dispatch(
+      mektupYazdir(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  handleSearchIhracatciFields(ihracatciVkn, ihracatciTckn) {
+    this.props.dispatch(searchIhracatci(ihracatciVkn, ihracatciTckn));
+  }
+
+  handleClearMektupFields = () => {
+    this.setState((s) => ({
+      searchKararNo: '',
+      searchBelgeTip: '',
+      searchBelgeNo: '',
+      searchBelgeYil: '',
+      searchOdemeTarih: '',
+      searchOdemeTarihSon: '',
+      searchVkn: '',
+      searchTckn: '',
+      searchMektupTip: '',
+      clearKararNo: !s.clearKararNo,
+      clearIhracatciAdi: !s.clearIhracatciAdi,
+    }));
+    this.props.dispatch(clearIhracatci());
+  };
+
+  // tabloda seçimler
+  handleClearList() {
+    this.setState({ selectedTaleps: new Set(), selectedRows: [] });
+  }
+
+  handleSelectMektupIslemleriFromList(rowsData) {
+    const selectedTaleps = new Set();
+    const selectedItemsSet = new Set();
+
+    rowsData.forEach((rowData) => {
+      selectedTaleps.add(rowData.requestId);
+      selectedItemsSet.add(rowData.id);
+    });
+
+    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
+  }
+
+  handleSelectMektupIslemleri(rowData, checked) {
+    const { selectedTaleps, selectedRows } = this.state;
+    const selectedItemsSet = new Set(selectedRows);
+
+    if (checked) {
+      selectedTaleps.add(rowData.requestId);
+      selectedItemsSet.add(rowData.id);
+    } else {
+      selectedTaleps.delete(rowData.requestId);
+      selectedItemsSet.delete(rowData.id);
+    }
+
+    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
+  }
+
+  // opsiyonel: datatable prop'larında referans var ise boş tanımlı kalsın
+  handlePageSizeChange = () => {};
+  handlePaginationChange = () => {};
+
+  // --- render ---
 
   render() {
     return (
@@ -85,14 +192,16 @@ export class OdemeMektuplari extends React.Component {
   }
 
   renderOdemeMektup() {
-    return <div>
-      {this.renderSearchOdemeMektup()}
-      {this.renderMektupIslemleriTable()}
-    </div>;
+    return (
+      <div>
+        {this.renderSearchOdemeMektup()}
+        {this.renderMektupIslemleriTable()}
+      </div>
+    );
   }
 
   renderCheckProcess() {
-    const { tranState } = this.state;
+    const { tranState, onConfirm } = this.state;
     if (tranState === TRAN_STATES.IDLE) return null;
 
     return (
@@ -107,17 +216,16 @@ export class OdemeMektuplari extends React.Component {
                   işleme devam etmek istediğinize emin misiniz?
                 </List.Content>
                 <div style={{ marginTop: '15px', textAlign: 'right' }}>
-                  <Button color="red" onClick={() => this.setState({ tranState: TRAN_STATES.IDLE })}>
+                  <Button color="red" onClick={() => this.setState({ tranState: TRAN_STATES.IDLE, onConfirm: null })}>
                     İptal
                   </Button>
                   <Button
                     color="green"
                     onClick={() => {
-                      if (this.state.submitType === 'sendemail') {
-                        this.mektupEpostaGonderFunc();
-                      }
-                      this.setState({ tranState: TRAN_STATES.IDLE });
-                    }}>
+                      if (typeof onConfirm === 'function') onConfirm();
+                      this.setState({ tranState: TRAN_STATES.IDLE, onConfirm: null });
+                    }}
+                  >
                     Devam Et
                   </Button>
                 </div>
@@ -139,23 +247,42 @@ export class OdemeMektuplari extends React.Component {
       <div className="align-form-fields">
         <Form
           onSubmit={(event, data) => {
-            if (data.validateForm() === null) {
-              if (this.state.submitType === 'print') {
-                this.mektupYazdirFields();
-              } else if (this.state.submitType === 'sendemail') {
-                if (!this.state.searchVkn && !this.state.searchTckn) {
-                  this.setState({ tranState: TRAN_STATES.WARNING_CHECK });
-                  return;
-                }
-                this.mektupEpostaGonderFunc();
-              }
-            } else if(this.state.submitType === 'searchTalep'){
-              debugger;
-                this.mektupTalepSearchFunc();
-            } else {
+            event.preventDefault();
+
+            const errors = data.validateForm();
+            const submitterId = event?.nativeEvent?.submitter?.id;
+
+            // Temizle butonu submit değil, ama yine de güvenlik için koruyalım
+            if (submitterId === 'btnClearSearchMektup') return;
+
+            if (errors !== null && submitterId !== 'btnMektupSearchNew') {
               toast.error('Lütfen, hatalı alanları düzeltiniz!');
+              return;
             }
-          }}>
+
+            switch (submitterId) {
+              case 'btnMektupSearchNew':
+                // Arama için validasyon serbest; istersen tarih/mektupTip kontrolü ekleyebilirsin
+                this.mektupTalepSearchFunc();
+                break;
+              case 'btnYazdir':
+                this.mektupYazdirFields();
+                break;
+              case 'btnEmailGonder':
+                if (!this.state.searchVkn && !this.state.searchTckn) {
+                  this.setState({
+                    tranState: TRAN_STATES.WARNING_CHECK,
+                    onConfirm: () => this.mektupEpostaGonderFunc(),
+                  });
+                } else {
+                  this.mektupEpostaGonderFunc();
+                }
+                break;
+              default:
+                break;
+            }
+          }}
+        >
           <Grid columns="5">
             <Grid.Row>
               <Grid.Column width={5}>
@@ -166,19 +293,16 @@ export class OdemeMektuplari extends React.Component {
                   value={this.state.searchBelgeTip}
                   search
                   clearable
-                  onChange={(e, data) => {
-                    this.setState({ searchBelgeTip: data.value });
-                  }}
+                  onChange={(e, data) => this.setState({ searchBelgeTip: data.value })}
                   options={paketTipiOptions}
                 />
               </Grid.Column>
+
               <Grid.Column width={5}>
                 <Form.Input
                   label="Belge No"
-                  value={this.state.searchBelgeNo ? this.state.searchBelgeNo : ''}
-                  onChange={(e, data) => {
-                    this.setState({ searchBelgeNo: data.value });
-                  }}
+                  value={this.state.searchBelgeNo || ''}
+                  onChange={(e, data) => this.setState({ searchBelgeNo: data.value })}
                   validation={{
                     rules: [{ type: 'length', max: 10 }, { type: 'numeric' }],
                     validateOnChange: true,
@@ -187,15 +311,14 @@ export class OdemeMektuplari extends React.Component {
                   }}
                 />
               </Grid.Column>
+
               <Grid.Column width={4}>
                 <Form.Input
                   label="Yıl"
-                  type="number"
+                  type="text"
                   maxLength="4"
-                  value={this.state.searchBelgeYil ? this.state.searchBelgeYil : ''}
-                  onChange={(e, data) => {
-                    this.setState({ searchBelgeYil: data.value });
-                  }}
+                  value={this.state.searchBelgeYil || ''}
+                  onChange={(e, data) => this.setState({ searchBelgeYil: data.value })}
                   validation={{
                     rules: [{ type: 'length', max: 4 }, { type: 'numeric' }],
                     validateOnChange: true,
@@ -205,17 +328,20 @@ export class OdemeMektuplari extends React.Component {
                 />
               </Grid.Column>
             </Grid.Row>
+
             <Grid.Row>
               <Grid.Column width={16}>
-                <DropdownKararNo onSelect={value => this.setState({ searchKararNo: value })} clearTrigger={this.state.clearKararNo} />
+                <DropdownKararNo
+                  onSelect={(value) => this.setState({ searchKararNo: value })}
+                  clearTrigger={this.state.clearKararNo}
+                />
               </Grid.Column>
+
               <Grid.Column width={8}>
                 <Form.Field>
                   <Form.Datepicker
                     label="İlk Ödeme Tarihi"
-                    onChange={date => {
-                      this.setState({ searchOdemeTarih: date });
-                    }}
+                    onChange={(date) => this.setState({ searchOdemeTarih: date })}
                     dateFormat="DD.MM.YYYY"
                     selected={this.state.searchOdemeTarih}
                     showYearDropdown
@@ -230,13 +356,12 @@ export class OdemeMektuplari extends React.Component {
                   />
                 </Form.Field>
               </Grid.Column>
+
               <Grid.Column width={8}>
                 <Form.Field>
                   <Form.Datepicker
                     label="Son Ödeme Tarihi"
-                    onChange={date => {
-                      this.setState({ searchOdemeTarihSon: date });
-                    }}
+                    onChange={(date) => this.setState({ searchOdemeTarihSon: date })}
                     dateFormat="DD.MM.YYYY"
                     selected={this.state.searchOdemeTarihSon}
                     showYearDropdown
@@ -252,6 +377,7 @@ export class OdemeMektuplari extends React.Component {
                 </Form.Field>
               </Grid.Column>
             </Grid.Row>
+
             <Grid.Row>
               <Grid.Column width={8}>
                 <Form.Input
@@ -262,9 +388,10 @@ export class OdemeMektuplari extends React.Component {
                   value={this.state.searchVkn}
                   disabled={this.state.searchTckn !== ''}
                   onChange={(e, data) => {
-                    this.setState({ searchVkn: data.value });
-                    if (data.value.length === 10) {
-                      this.handleSearchIhracatciFields(data.value, '');
+                    const v = data.value;
+                    this.setState({ searchVkn: v });
+                    if (v.length === 10) {
+                      this.handleSearchIhracatciFields(v, '');
                     } else {
                       this.props.dispatch(clearIhracatci());
                     }
@@ -277,6 +404,7 @@ export class OdemeMektuplari extends React.Component {
                   }}
                 />
               </Grid.Column>
+
               <Grid.Column width={8}>
                 <Form.Input
                   id="searchIhracatciTckn"
@@ -286,9 +414,10 @@ export class OdemeMektuplari extends React.Component {
                   value={this.state.searchTckn}
                   disabled={this.state.searchVkn !== ''}
                   onChange={(e, data) => {
-                    this.setState({ searchTckn: data.value });
-                    if (data.value.length === 11) {
-                      this.handleSearchIhracatciFields('', data.value);
+                    const t = data.value;
+                    this.setState({ searchTckn: t });
+                    if (t.length === 11) {
+                      this.handleSearchIhracatciFields('', t);
                     } else {
                       this.props.dispatch(clearIhracatci());
                     }
@@ -302,11 +431,16 @@ export class OdemeMektuplari extends React.Component {
                 />
               </Grid.Column>
             </Grid.Row>
+
             <Grid.Row>
               <Grid.Column width={16}>
-                <DropdownIhracatci onSelect={this.handleIhracatciSelect} clearTrigger={this.state.clearIhracatciAdi} />
+                <DropdownIhracatci
+                  onSelect={this.handleIhracatciSelect}
+                  clearTrigger={this.state.clearIhracatciAdi}
+                />
               </Grid.Column>
             </Grid.Row>
+
             <Grid.Row>
               <Grid.Column width={16}>
                 <Form.Select
@@ -316,9 +450,7 @@ export class OdemeMektuplari extends React.Component {
                   value={this.state.searchMektupTip}
                   search
                   clearable
-                  onChange={(e, data) => {
-                    this.setState({ searchMektupTip: data.value });
-                  }}
+                  onChange={(e, data) => this.setState({ searchMektupTip: data.value })}
                   options={mektupTipiOptions}
                   validation={{
                     rules: [{ type: 'required' }],
@@ -338,38 +470,40 @@ export class OdemeMektuplari extends React.Component {
                       id="btnMektupSearchNew"
                       content="Ara"
                       type="submit"
-                      onClick={() => this.setState({ submitType: 'searchTalep' })}
                       loading={this.props.odemeMektuplari.mektupSearchLoading}
                       className="dfif-button-blue"
                     />
                   </Form.Field>
+
                   <Form.Field>
                     <Button
                       id="btnClearSearchMektup"
                       content="Temizle"
+                      type="button"
                       onClick={this.handleClearMektupFields}
                       className="dfif-button-white"
                     />
                   </Form.Field>
+
                   <Form.Field>
                     <Button
                       id="btnYazdir"
                       content="Yazdır"
                       type="submit"
-                      onClick={() => this.setState({ submitType: 'print' })}
                       loading={this.props.odemeMektuplari.mektupYazdirLoading}
                       className="dfif-button-blue"
                     />
                   </Form.Field>
+
                   {isSearchMektupTipValid(this.state.searchMektupTip) && (
                     <Form.Field>
                       <Button
                         id="btnEmailGonder"
                         content="İhracatçılara Eposta Gönder"
                         type="submit"
-                        onClick={() => this.setState({ submitType: 'sendemail' })}
                         loading={this.props.odemeMektuplari.mektupEpostaGonderLoading}
-                        className="dfif-button-blue"></Button>
+                        className="dfif-button-blue"
+                      />
                     </Form.Field>
                   )}
                 </Form.Group>
@@ -386,13 +520,13 @@ export class OdemeMektuplari extends React.Component {
       <Segment className="header-segment">
         <b>Talep Listesi</b>
       </Segment>
+
       <DataTable
         loading={this.props.odemeMektuplari.mektupSearchLoading}
         columns={MektupMainColumns}
         resizable
         getRowKey="requestId"
-        data={this.props.odemeMektuplari.mektupTalepList === undefined ? [] : this.props.odemeMektuplari.mektupTalepList}
-        //header={this.renderMektupTalepIslemleriMenu()}
+        data={this.props.odemeMektuplari.mektupTalepList || []}
         celled
         selectable
         noResultsMessage="Aradığınız kriterlere uygun kayıt bulunamadı"
@@ -400,8 +534,8 @@ export class OdemeMektuplari extends React.Component {
         export={{ fileName: 'Mektup Talep Islemleri', sheetName: 'Sheet 1', types: ['xlsx'] }}
         rowSelection="multiple"
         onRowSelect={this.handleSelectMektupIslemleri}
-        onRowsSelect={rowsData => {
-          if (rowsData.length > 0) {
+        onRowsSelect={(rowsData) => {
+          if (rowsData && rowsData.length > 0) {
             this.handleSelectMektupIslemleriFromList(rowsData);
           } else {
             this.handleClearList();
@@ -412,134 +546,18 @@ export class OdemeMektuplari extends React.Component {
         page
         pagination
         onPageSizeChange={this.handlePageSizeChange}
-        /*paginationProps={{
-          totalPages: this.props.odemeMektuplari.totalPages,
-          activePage: this.props.odemeMektuplari.activePage,
-          onPageChange: this.handlePaginationChange,
-        }}*/
-       // getRowProps={}
-        getRowDetail={rowData => (
+        getRowDetail={(rowData) => (
           <DataTable
             getRowKey="itemId"
             columns={MektupDetayColumns}
             resizable
             data={rowData.mektupItemDTOList}
             celled
-           // onRowClick={}
-           // getRowDetail={}
           />
         )}
       />
     </Segment.Group>
   );
-
-  handleClearList() {
-    this.setState({ selectedTalepss: new Set(), selectedRows: [] });
-  }
-
-  handleSelectMektupIslemleriFromList(rowsData) {
-    const selectedTaleps = new Set();
-    const selectedRows = [];
-
-    const selectedItemsSet = new Set(selectedRows);
-
-    // eslint-disable-next-line array-callback-return
-    rowsData.map(rowData => {
-      selectedTaleps.add(rowData.requestId);
-      selectedItemsSet.add(rowData.id);
-    });
-
-    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
-  }
-
-  handleSelectMektupIslemleri(rowData, checked) {
-    const { selectedTaleps, selectedRows } = this.state;
-
-    const selectedItemsSet = new Set(selectedRows);
-
-    if (checked) {
-      selectedTaleps.add(rowData.requestId); //todo burayı değiştirecğiz
-      selectedItemsSet.add(rowData.id);
-    } else {
-      selectedTaleps.delete(rowData.requestId);
-      selectedItemsSet.delete(rowData.id);
-    }
-
-    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
-  }
-
-
-
-  handleSearchIhracatciFields(ihracatciVkn, ihracatciTckn) {
-    this.props.dispatch(searchIhracatci(ihracatciVkn, ihracatciTckn));
-  }
-
-  handleClearMektupFields = () => {
-    this.setState({
-      searchKararNo: '',
-      searchBelgeTip: '',
-      searchBelgeNo: '',
-      searchBelgeYil: '',
-      searchOdemeTarih: '',
-      searchOdemeTarihSon: '',
-      searchVkn: '',
-      searchTckn: '',
-      searchMektupTip: '',
-      // eslint-disable-next-line react/no-access-state-in-setstate
-      clearKararNo: !this.state.clearKararNo,
-      // eslint-disable-next-line react/no-access-state-in-setstate
-      clearIhracatciAdi: !this.state.clearIhracatciAdi,
-    });
-    // this.props.odemeMektuplari.ihracatci.ad = '';
-  };
-
-  mektupTalepSearchFunc = () => {
-    this.props.dispatch(
-      mektupTalepSearch(
-        this.state.searchKararNo,
-        this.state.searchBelgeTip,
-        this.state.searchBelgeNo,
-        this.state.searchBelgeYil,
-        this.state.searchOdemeTarih !== null && this.state.searchOdemeTarih !== '' ? this.state.searchOdemeTarih.format('yyyy-MM-DD') : '',
-        this.state.searchOdemeTarihSon !== null && this.state.searchOdemeTarihSon !== '' ? this.state.searchOdemeTarihSon.format('yyyy-MM-DD') : '',
-        this.state.searchVkn,
-        this.state.searchTckn,
-        this.state.searchMektupTip,
-      ),
-    );
-  };
-
-  mektupEpostaGonderFunc = () => {
-    this.props.dispatch(
-      mektupEpostaGonder(
-        this.state.searchKararNo,
-        this.state.searchBelgeTip,
-        this.state.searchBelgeNo,
-        this.state.searchBelgeYil,
-        this.state.searchOdemeTarih !== null && this.state.searchOdemeTarih !== '' ? this.state.searchOdemeTarih.format('yyyy-MM-DD') : '',
-        this.state.searchOdemeTarihSon !== null && this.state.searchOdemeTarihSon !== '' ? this.state.searchOdemeTarihSon.format('yyyy-MM-DD') : '',
-        this.state.searchVkn,
-        this.state.searchTckn,
-        this.state.searchMektupTip,
-      ),
-    );
-  };
-
-  mektupYazdirFields = () => {
-    this.props.dispatch(
-      mektupYazdir(
-        this.state.searchKararNo,
-        this.state.searchBelgeTip,
-        this.state.searchBelgeNo,
-        this.state.searchBelgeYil,
-        this.state.searchOdemeTarih !== null && this.state.searchOdemeTarih !== '' ? this.state.searchOdemeTarih.format('yyyy-MM-DD') : '',
-        this.state.searchOdemeTarihSon !== null && this.state.searchOdemeTarihSon !== '' ? this.state.searchOdemeTarihSon.format('yyyy-MM-DD') : '',
-        this.state.searchVkn,
-        this.state.searchTckn,
-        this.state.searchMektupTip,
-      ),
-    );
-  };
 }
 
 OdemeMektuplari.propTypes = {
@@ -556,24 +574,14 @@ function isSearchMektupTipValid(searchMektupTip) {
 }
 
 function mapDispatchToProps(dispatch) {
-  return {
-    dispatch,
-  };
+  return { dispatch };
 }
 
 const withConnect = connect(mapStateToProps, mapDispatchToProps);
-
 const withReducer = injectReducer({ key: 'odemeMektuplari', reducer });
 const withSaga = injectSaga({ key: 'odemeMektuplari', saga });
 
 export default compose(withReducer, withSaga, withConnect)(injectIntl(OdemeMektuplari));
-
-
-
-
-
-
-
 
 
 yunus
