@@ -1,4 +1,98 @@
+ @Override
+    public LetterRequestListePageDTO handleGetLetterRequestDtoTransaction(
+            int activePage, int pageSize, KararTipiEnum belgeTip,
+            Integer belgeNo,
+            Integer belgeYil,
+            String kararNo,
+            LocalDate ilkOdemeTarih,
+            LocalDate sonOdemeTarih,
+            String vkn,
+            String tckn,
+            MektupTipEnum mektupTip) throws Exception {
 
+        log.debug("handleGetLetterRequestDtoTransaction method called with parameters: belgeTip={}, belgeNo={}, belgeYil={}, kararNo={}, ilkOdemeTarih={}, sonOdemeTarih={}, vkn={}, tckn={}, mektupTip={}",
+                belgeTip, belgeNo, belgeYil, kararNo, ilkOdemeTarih, sonOdemeTarih, vkn, tckn, mektupTip);
+
+
+        int size = 0;
+        Sort sort = null;
+
+        List<LetterRequest> letterRequestList = letterRequestTransactionService.listLetterRequest(ilkOdemeTarih, sonOdemeTarih, belgeTip, belgeNo, belgeYil, kararNo, vkn, tckn, mektupTip);
+
+        if (letterRequestList == null || letterRequestList.isEmpty()) {
+            log.warn("letterRequestList is empty or null. Returning empty list.");
+            return new LetterRequestListePageDTO(new ArrayList<>(), size, 1, sort);
+        }
+
+        int totalPage = 1 + letterRequestList.size() / 10;
+        if (activePage > totalPage) {
+            activePage = 1;
+        }
+
+        List<CompletableFuture<LetterRequestDto>> futures = letterRequestList.stream()
+                .map(letterRequest -> CompletableFuture.supplyAsync(()-> {
+                    log.debug("Mapping LetterRequest to LetterRequestDto. LetterRequest ID: {}", letterRequest.getId());
+
+                    LetterRequestDto letterRequestDto = new LetterRequestDto();
+                    letterRequestDto.setRequestTypeId(MektupTipEnum.convertRequestTypeIdToMektupTip(letterRequest.getRequestTypeId()).getAdi());
+
+                    letterRequestDto.setTalepDurum(Optional.ofNullable(LetterStatusEnum.getByKod(String.valueOf(letterRequest.getStatusId())))
+                            .map(LetterStatusEnum::getAdi)
+                            .orElse(null));
+
+                    try {
+                        letterRequestConverter.doConvertToEntity(letterRequest, letterRequestDto);
+                    } catch (ParseException e) {
+                        String message = "Failed to convert letterRequestDTO to entity";
+                        log.error("Mektup isteği dönüştürme hatası: {}", e.getMessage(), e);
+                        throw new RuntimeException(message, e);
+                    }
+
+                    log.debug("Getting LetterItems for LetterRequest ID: {}", letterRequest.getId());
+                    List<LetterItemDTO> letterItemDTOs = jobTxService.getItems(letterRequest.getId())
+                            .stream()
+                            .map(letterItem -> {
+                                log.debug("Mapping LetterItem to LetterItemDTO. LetterItem ID: {}", letterItem.getId());
+
+                                LetterItemDTO letterItemDto = new LetterItemDTO();
+                                letterItemDto.setStatus(Optional.ofNullable(LetterStatusEnum.getByKod(String.valueOf(letterItem.getStatusId())))
+                                        .map(LetterStatusEnum::getAdi)
+                                        .orElse(null));
+
+                                letterItemConverter.doConvertToDto(letterItemDto, letterItem);
+                                letterItemDto.setNotifyLogs(this.preparedNotifyLogDto(letterItem));
+
+                                return letterItemDto;
+                            })
+                            .collect(Collectors.toList());
+
+                    letterRequestDto.setItemDTOList(letterItemDTOs);
+                    return letterRequestDto;
+                },letterReqExecutor))
+                .collect(Collectors.toList());
+
+        List<LetterRequestDto> result = futures.stream().map(CompletableFuture::join)
+                .sorted(Comparator.comparing(LetterRequestDto::getSorguTarihi, Comparator.reverseOrder()))
+                .collect(Collectors.toList());
+
+        log.debug("handleGetLetterRequestDtoTransaction method completed successfully.");
+
+        Pageable pageable = PageRequest.of(activePage - 1, pageSize);
+        int start = (int) pageable.getOffset();
+        int end = Math.min((start + pageable.getPageSize()), result.size());
+
+        List<LetterRequestDto> pagedLetterRequestDtoList = result.subList(start, end);
+
+        Page<LetterRequestDto> page = new PageImpl<>(pagedLetterRequestDtoList, pageable, result.size());
+        size = (int) page.getTotalElements();
+        totalPage = page.getTotalPages();
+        sort = page.getSort();
+
+        return new LetterRequestListePageDTO(pagedLetterRequestDtoList, size, totalPage, sort);
+
+    }
+
+//exe 
 /* eslint-disable react/no-is-mounted */
 /**
  *
