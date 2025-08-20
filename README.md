@@ -19,6 +19,644 @@ import { createStructuredSelector } from 'reselect';
 import { Form, DataTable, Button, Segment, Grid, Modal, List } from 'tcmb-ui-components';
 
 import reducer from './redux/reducer';
+import saga from './redux/saga';
+import { mektupTipiOptions, paketTipiOptions } from './redux/utility';
+import { mektupYazdir, searchIhracatci, clearIhracatci, mektupEpostaGonder,mektupTalepSearch } from './redux/actions';
+import makeSelectOdemeMektuplari from './redux/selectors';
+import DropdownKararNo from '../../components/DropdownKararNo';
+import DropdownIhracatci from '../../components/DropdownIhracatci';
+
+import { MektupDetayColumns, MektupDetayLogColumns, MektupMainColumns } from './columns';
+import ReactJson from 'react-json-view';
+
+/* eslint-disable react/prefer-stateless-function */
+const TRAN_STATES = {
+  IDLE: 'IDLE',
+  WARNING_CHECK: 'WARNING_CHECK',
+};
+
+export class OdemeMektuplari extends React.Component {
+  constructor(props) {
+    super(props);
+
+    this.state = {
+      searchKararNo: '',
+      searchBelgeTip: '',
+      searchBelgeNo: '',
+      searchBelgeYil: '',
+      searchOdemeTarih: '',
+      searchOdemeTarihSon: '',
+      searchVkn: '',
+      searchTckn: '',
+      searchMektupTip: '',
+      clearKararNo: false,
+      tranState: TRAN_STATES.IDLE,
+      clearIhracatciAdi: false,
+      onConfirm: null, // modal onaylandığında çalıştırılacak aksiyon
+      selectedRows: [],
+      selectedTaleps: new Set(),
+    };
+    this.handlePaginationChange = this.handlePaginationChange.bind(this);
+    this.handlePageSizeChange = this.handlePageSizeChange.bind(this);
+    //this.handleSelectMuhasebeIslemleri = this.handleSelectMuhasebeIslemleri.bind(this);
+  }
+
+  // --- helpers ---
+
+  handleIhracatciSelect = (ihracatciAdi) => {
+    // "1234567890 - Foo A.Ş." -> "1234567890"
+    const ihracatciKodu = (ihracatciAdi.split(' - ')[0] || '').trim();
+    if (ihracatciKodu.length === 10) {
+      this.setState({ searchVkn: ihracatciKodu, searchTckn: '' });
+    } else if (ihracatciKodu.length === 11) {
+      this.setState({ searchTckn: ihracatciKodu, searchVkn: '' });
+    } else {
+      this.setState({ searchTckn: '', searchVkn: '' });
+    }
+  };
+
+  formatDate = (d) => (d && d.format ? d.format('YYYY-MM-DD') : '');
+
+  // --- actions ---
+
+  mektupTalepSearchFunc = () => {
+    this.props.dispatch(
+      mektupTalepSearch(
+        this.props.odemeMektuplari.activePage,
+        this.props.odemeMektuplari.rowCount,
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  mektupEpostaGonderFunc = () => {
+    this.props.dispatch(
+      mektupEpostaGonder(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  mektupYazdirFields = () => {
+    this.props.dispatch(
+      mektupYazdir(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  handleSearchIhracatciFields(ihracatciVkn, ihracatciTckn) {
+    this.props.dispatch(searchIhracatci(ihracatciVkn, ihracatciTckn));
+  }
+
+  handleClearMektupFields = () => {
+    this.setState((s) => ({
+      searchKararNo: '',
+      searchBelgeTip: '',
+      searchBelgeNo: '',
+      searchBelgeYil: '',
+      searchOdemeTarih: '',
+      searchOdemeTarihSon: '',
+      searchVkn: '',
+      searchTckn: '',
+      searchMektupTip: '',
+      clearKararNo: !s.clearKararNo,
+      clearIhracatciAdi: !s.clearIhracatciAdi,
+    }));
+    this.props.dispatch(clearIhracatci());
+  };
+
+  // tabloda seçimler
+  handleClearList() {
+    this.setState({ selectedTaleps: new Set(), selectedRows: [] });
+  }
+
+  handleSelectMektupIslemleriFromList(rowsData) {
+    const selectedTaleps = new Set();
+    const selectedItemsSet = new Set();
+
+    rowsData.forEach((rowData) => {
+      selectedTaleps.add(rowData.requestId);
+      selectedItemsSet.add(rowData.id);
+    });
+
+    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
+  }
+
+  handleSelectMektupIslemleri(rowData, checked) {
+    const { selectedTaleps, selectedRows } = this.state;
+    const selectedItemsSet = new Set(selectedRows);
+
+    if (checked) {
+      selectedTaleps.add(rowData.requestId);
+      selectedItemsSet.add(rowData.id);
+    } else {
+      selectedTaleps.delete(rowData.requestId);
+      selectedItemsSet.delete(rowData.id);
+    }
+
+    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
+  }
+
+  // opsiyonel: datatable prop'larında referans var ise boş tanımlı kalsın
+
+
+
+  handlePaginationChange(event, { activePage }) {
+    if (activePage !== this.props.odemeMektuplari.activePage) {
+      this.props.odemeMektuplari.activePage = activePage;
+      this.mektupTalepSearchFunc();
+      this.setState({ selectedTaleps: new Set() });
+      this.setState({ selectedRows: [] });
+    }
+  }
+
+  handlePageSizeChange(event, data) {
+    const newPageSize = data.value;
+    const newTotalPages = Math.ceil(this.props.odemeMektuplari.size / newPageSize);
+    const newActivePage = Math.min(newTotalPages, this.props.odemeMektuplari.activePage);
+
+    this.props.odemeMektuplari.rowCount = newPageSize;
+    this.props.odemeMektuplari.totalPages = newTotalPages;
+    this.props.odemeMektuplari.activePage = newActivePage;
+
+    this.mektupTalepSearchFunc();
+    this.setState({ selectedTaleps: new Set() });
+  }
+
+
+
+  // --- render ---
+
+  render() {
+    return (
+      <div>
+        {this.renderOdemeMektup()}
+        {this.renderCheckProcess()}
+      </div>
+    );
+  }
+
+  renderOdemeMektup() {
+    return (
+      <div>
+        {this.renderSearchOdemeMektup()}
+        {this.renderMektupIslemleriTable()}
+      </div>
+    );
+  }
+
+  renderCheckProcess() {
+    const { tranState, onConfirm } = this.state;
+    if (tranState === TRAN_STATES.IDLE) return null;
+
+    return (
+      <Modal open size="tiny">
+        <Modal.Content style={{ minHeight: '120px' }}>
+          <List relaxed size="large">
+            {tranState === TRAN_STATES.WARNING_CHECK && (
+              <List.Item>
+                <List.Icon name="exclamation triangle" color="yellow" />
+                <List.Content>
+                  VKN veya TCKN alanları boş! İşleme devam etmeniz durumunda seçilen tarihe ilişkin tüm ödeme mektupları gönderilecektir. Bu
+                  işleme devam etmek istediğinize emin misiniz?
+                </List.Content>
+                <div style={{ marginTop: '15px', textAlign: 'right' }}>
+                  <Button color="red" onClick={() => this.setState({ tranState: TRAN_STATES.IDLE, onConfirm: null })}>
+                    İptal
+                  </Button>
+                  <Button
+                    color="green"
+                    onClick={() => {
+                      if (typeof onConfirm === 'function') onConfirm();
+                      this.setState({ tranState: TRAN_STATES.IDLE, onConfirm: null });
+                    }}
+                  >
+                    Devam Et
+                  </Button>
+                </div>
+              </List.Item>
+            )}
+          </List>
+        </Modal.Content>
+      </Modal>
+    );
+  }
+
+  renderSearchOdemeMektup = () => (
+    <Segment.Group className="tcmb-datatable">
+      <Segment className="header-segment">
+        <b>Mektup Arama</b>
+      </Segment>
+      <Segment className="table-segment" />
+      <br />
+      <div className="align-form-fields">
+        <Form
+          onSubmit={(event, data) => {
+            event.preventDefault();
+
+            const errors = data.validateForm();
+            const submitterId = event?.nativeEvent?.submitter?.id;
+
+            // Temizle butonu submit değil, ama yine de güvenlik için koruyalım
+            if (submitterId === 'btnClearSearchMektup') return;
+
+            if (errors !== null && submitterId !== 'btnMektupSearchNew') {
+              toast.error('Lütfen, hatalı alanları düzeltiniz!');
+              return;
+            }
+
+            switch (submitterId) {
+              case 'btnMektupSearchNew':
+                // Arama için validasyon serbest; istersen tarih/mektupTip kontrolü ekleyebilirsin
+                this.mektupTalepSearchFunc();
+                break;
+              case 'btnYazdir':
+                this.mektupYazdirFields();
+                break;
+              case 'btnEmailGonder':
+                if (!this.state.searchVkn && !this.state.searchTckn) {
+                  this.setState({
+                    tranState: TRAN_STATES.WARNING_CHECK,
+                    onConfirm: () => this.mektupEpostaGonderFunc(),
+                  });
+                } else {
+                  this.mektupEpostaGonderFunc();
+                }
+                break;
+              default:
+                break;
+            }
+          }}
+        >
+          <Grid columns="5">
+            <Grid.Row>
+              <Grid.Column width={5}>
+                <Form.Select
+                  id="TahakkukSearchTurId"
+                  label="Tahakkuk Türü"
+                  placeholder=""
+                  value={this.state.searchBelgeTip}
+                  search
+                  clearable
+                  onChange={(e, data) => this.setState({ searchBelgeTip: data.value })}
+                  options={paketTipiOptions}
+                />
+              </Grid.Column>
+
+              <Grid.Column width={5}>
+                <Form.Input
+                  label="Belge No"
+                  value={this.state.searchBelgeNo || ''}
+                  onChange={(e, data) => this.setState({ searchBelgeNo: data.value })}
+                  validation={{
+                    rules: [{ type: 'length', max: 10 }, { type: 'numeric' }],
+                    validateOnChange: true,
+                    validateOnMount: true,
+                    showErrors: 'all',
+                  }}
+                />
+              </Grid.Column>
+
+              <Grid.Column width={4}>
+                <Form.Input
+                  label="Yıl"
+                  type="text"
+                  maxLength="4"
+                  value={this.state.searchBelgeYil || ''}
+                  onChange={(e, data) => this.setState({ searchBelgeYil: data.value })}
+                  validation={{
+                    rules: [{ type: 'length', max: 4 }, { type: 'numeric' }],
+                    validateOnChange: true,
+                    validateOnMount: true,
+                    showErrors: 'all',
+                  }}
+                />
+              </Grid.Column>
+            </Grid.Row>
+            <Grid.Row>
+              <Grid.Column width={16}>
+                <DropdownKararNo
+                  onSelect={(value) => this.setState({ searchKararNo: value })}
+                  clearTrigger={this.state.clearKararNo}
+                />
+              </Grid.Column>
+              <Grid.Column width={8}>
+                <Form.Field>
+                  <Form.Datepicker
+                    label="İlk Ödeme Tarihi"
+                    onChange={(date) => this.setState({ searchOdemeTarih: date })}
+                    dateFormat="DD.MM.YYYY"
+                    selected={this.state.searchOdemeTarih}
+                    showYearDropdown
+                    showMonthDropdown
+                    todayButton="Bugün"
+                    validation={{
+                      rules: [{ type: 'required' }],
+                      validateOnChange: true,
+                      validateOnMount: true,
+                      showErrors: 'all',
+                    }}
+                  />
+                </Form.Field>
+              </Grid.Column>
+              <Grid.Column width={8}>
+                <Form.Field>
+                  <Form.Datepicker
+                    label="Son Ödeme Tarihi"
+                    onChange={(date) => this.setState({ searchOdemeTarihSon: date })}
+                    dateFormat="DD.MM.YYYY"
+                    selected={this.state.searchOdemeTarihSon}
+                    showYearDropdown
+                    showMonthDropdown
+                    todayButton="Bugün"
+                    validation={{
+                      rules: [{ type: 'required' }],
+                      validateOnChange: true,
+                      validateOnMount: true,
+                      showErrors: 'all',
+                    }}
+                  />
+                </Form.Field>
+              </Grid.Column>
+            </Grid.Row>
+            <Grid.Row>
+              <Grid.Column width={8}>
+                <Form.Input
+                  id="searchIhracatciVkn"
+                  label="Firma Vergi Kimlik No"
+                  type="text"
+                  maxLength="10"
+                  value={this.state.searchVkn}
+                  disabled={this.state.searchTckn !== ''}
+                  onChange={(e, data) => {
+                    const v = data.value;
+                    this.setState({ searchVkn: v });
+                    if (v.length === 10) {
+                      this.handleSearchIhracatciFields(v, '');
+                    } else {
+                      this.props.dispatch(clearIhracatci());
+                    }
+                  }}
+                  validation={{
+                    rules: [{ type: 'length', max: 10 }, { type: 'numeric' }],
+                    validateOnChange: true,
+                    validateOnMount: true,
+                    showErrors: 'all',
+                  }}
+                />
+              </Grid.Column>
+
+              <Grid.Column width={8}>
+                <Form.Input
+                  id="searchIhracatciTckn"
+                  label="Üretici TC Kimlik No"
+                  type="text"
+                  maxLength="11"
+                  value={this.state.searchTckn}
+                  disabled={this.state.searchVkn !== ''}
+                  onChange={(e, data) => {
+                    const t = data.value;
+                    this.setState({ searchTckn: t });
+                    if (t.length === 11) {
+                      this.handleSearchIhracatciFields('', t);
+                    } else {
+                      this.props.dispatch(clearIhracatci());
+                    }
+                  }}
+                  validation={{
+                    rules: [{ type: 'length', max: 11 }, { type: 'numeric' }],
+                    validateOnChange: true,
+                    validateOnMount: true,
+                    showErrors: 'all',
+                  }}
+                />
+              </Grid.Column>
+            </Grid.Row>
+
+            <Grid.Row>
+              <Grid.Column width={16}>
+                <DropdownIhracatci
+                  onSelect={this.handleIhracatciSelect}
+                  clearTrigger={this.state.clearIhracatciAdi}
+                />
+              </Grid.Column>
+            </Grid.Row>
+
+            <Grid.Row>
+              <Grid.Column width={16}>
+                <Form.Select
+                  id="mektupTipId"
+                  label="Mektup Tipi"
+                  placeholder=""
+                  value={this.state.searchMektupTip}
+                  search
+                  clearable
+                  onChange={(e, data) => this.setState({ searchMektupTip: data.value })}
+                  options={mektupTipiOptions}
+                  validation={{
+                    rules: [{ type: 'required' }],
+                    validateOnChange: true,
+                    validateOnMount: true,
+                    showErrors: 'all',
+                  }}
+                />
+              </Grid.Column>
+            </Grid.Row>
+
+            <div className="align-buttons">
+              <Grid.Row>
+                <Form.Group>
+                  <Form.Field>
+                    <Button
+                      id="btnMektupSearchNew"
+                      content="Ara"
+                      type="submit"
+                      loading={this.props.odemeMektuplari.mektupSearchLoading}
+                      className="dfif-button-blue"
+                    />
+                  </Form.Field>
+
+                  <Form.Field>
+                    <Button
+                      id="btnClearSearchMektup"
+                      content="Temizle"
+                      type="button"
+                      onClick={this.handleClearMektupFields}
+                      className="dfif-button-white"
+                    />
+                  </Form.Field>
+
+                  <Form.Field>
+                    <Button
+                      id="btnYazdir"
+                      content="Yazdır"
+                      type="submit"
+                      loading={this.props.odemeMektuplari.mektupYazdirLoading}
+                      className="dfif-button-blue"
+                    />
+                  </Form.Field>
+
+                  {isSearchMektupTipValid(this.state.searchMektupTip) && (
+                    <Form.Field>
+                      <Button
+                        id="btnEmailGonder"
+                        content="İhracatçılara Eposta Gönder"
+                        type="submit"
+                        loading={this.props.odemeMektuplari.mektupEpostaGonderLoading}
+                        className="dfif-button-blue"
+                      />
+                    </Form.Field>
+                  )}
+                </Form.Group>
+              </Grid.Row>
+            </div>
+          </Grid>
+        </Form>
+      </div>
+    </Segment.Group>
+  );
+
+  renderMektupIslemleriTable = () => (
+    <Segment.Group className="tcmb-datatable">
+      <Segment className="header-segment">
+        <b>Talep Listesi</b>
+      </Segment>
+
+      <DataTable
+        loading={this.props.odemeMektuplari.mektupSearchLoading}
+        columns={MektupMainColumns}
+        resizable
+        getRowKey="requestId"
+        data={this.props.odemeMektuplari.mektupTalepList || []}
+        celled
+        selectable
+        noResultsMessage="Aradığınız kriterlere uygun kayıt bulunamadı"
+        columnMenu
+        export={{ fileName: 'Mektup Talep Islemleri', sheetName: 'Sheet 1', types: ['xlsx'] }}
+        rowSelection="multiple"
+        onRowSelect={this.handleSelectMektupIslemleri}
+        onRowsSelect={(rowsData) => {
+          if (rowsData && rowsData.length > 0) {
+            this.handleSelectMektupIslemleriFromList(rowsData);
+          } else {
+            this.handleClearList();
+          }
+        }}
+        selectedRows={this.state.selectedRows}
+        allRowsSelection
+        page
+        pagination
+        onPageSizeChange={this.handlePageSizeChange}
+        paginationProps={{
+          totalPages: this.props.odemeMektuplari.totalPages,
+          activePage: this.props.odemeMektuplari.activePage,
+          onPageChange: this.handlePaginationChange,
+        }}
+        getRowDetail={(rowData) => (
+          <DataTable
+            getRowKey="itemId"
+            columns={MektupDetayColumns}
+            resizable
+            data={rowData.itemDTOList}
+            celled
+            getRowDetail={(rowData) => (
+              <DataTable
+                getRowKey="logId"
+                columns={MektupDetayLogColumns}
+                resizable
+                data={rowData.notifyLogs}
+                celled
+                getRowDetail={rowLogData => (
+                  <div>
+                    <p>
+                      <b>{rowLogData.mailBody}</b>
+                    </p>
+                  </div>
+                )}
+              />
+            )}
+          />
+        )}
+      />
+    </Segment.Group>
+  );
+}
+
+OdemeMektuplari.propTypes = {
+  dispatch: PropTypes.func.isRequired,
+  odemeMektuplari: PropTypes.any,
+};
+
+const mapStateToProps = createStructuredSelector({
+  odemeMektuplari: makeSelectOdemeMektuplari(),
+});
+
+function isSearchMektupTipValid(searchMektupTip) {
+  return searchMektupTip === '1' || searchMektupTip === '2' || searchMektupTip === '4';
+}
+
+function mapDispatchToProps(dispatch) {
+  return { dispatch };
+}
+
+const withConnect = connect(mapStateToProps, mapDispatchToProps);
+const withReducer = injectReducer({ key: 'odemeMektuplari', reducer });
+const withSaga = injectSaga({ key: 'odemeMektuplari', saga });
+
+export default compose(withReducer, withSaga, withConnect)(injectIntl(OdemeMektuplari));
+
+
+
+
+sonnnnn
+
+
+/* eslint-disable react/no-is-mounted */
+/**
+ *
+ * OdemeMektuplari
+ *
+ */
+
+import React from 'react';
+import PropTypes from 'prop-types';
+
+import injectSaga from 'utils/injectSaga';
+import injectReducer from 'utils/injectReducer';
+import { injectIntl } from 'react-intl';
+import { connect } from 'react-redux';
+import { compose } from 'redux';
+import { toast } from 'react-toastify';
+
+import { createStructuredSelector } from 'reselect';
+import { Form, DataTable, Button, Segment, Grid, Modal, List } from 'tcmb-ui-components';
+
+import reducer from './redux/reducer';
 import saga, { mektupTalepSearch } from './redux/saga';
 import { mektupTipiOptions, paketTipiOptions } from './redux/utility';
 import { mektupYazdir, searchIhracatci, clearIhracatci, mektupEpostaGonder } from './redux/actions';
