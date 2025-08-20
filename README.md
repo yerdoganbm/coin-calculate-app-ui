@@ -1,4 +1,94 @@
+package tr.gov.tcmb.ogmdfif.service.impl;
 
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterAttempt;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
+import tr.gov.tcmb.ogmdfif.repository.LetterAttemptRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterItemRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+
+
+import javax.persistence.EntityManager;
+import java.time.OffsetDateTime;
+import java.util.List;
+
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+public class LetterJobTxService {
+
+    private final LetterRequestRepository requestRepo;
+    private final LetterItemRepository itemRepo;
+    private final LetterAttemptRepository attemptRepo;
+    
+    private final EntityManager em;
+
+    @Transactional(readOnly = true)
+    public List<LetterRequest> findReadyDue(int limit) {
+        return requestRepo.findReadyDue(limit);
+    }
+
+    @Transactional
+    public boolean claimRequest(UUID requestId) {
+        return requestRepo.markProcessing(requestId) > 0;
+    }
+
+    @Transactional
+    public void insertItemIfNotExists(UUID id,UUID requestId, String receiverKey, String receiverValue) {
+        itemRepo.insertIfNotExists(id,requestId, receiverKey, receiverValue);
+    }
+
+    @Transactional
+    public List<LetterItem> getItems(UUID requestId) {
+        return itemRepo.findAllByRequestId(requestId);
+    }
+
+    @Transactional
+    public void updateItemStatus(UUID itemId, short statusId, short attemptCount, String errorCode, String errorMessage) {
+        itemRepo.updateStatus(itemId, statusId, attemptCount, errorCode, errorMessage);
+    }
+
+    @Transactional
+    public void logAttempt(UUID id,UUID requestId, UUID itemId, short attemptNo,
+                           OffsetDateTime startedAt, OffsetDateTime finishedAt, int durationMs,
+                           String result, String errorCode, String errorMessage) {
+        attemptRepo.insertAttempt(id,requestId, itemId, attemptNo, startedAt, finishedAt, durationMs, result, errorCode, errorMessage);
+    }
+
+    @Transactional
+    public void finishRequest(UUID requestId, short statusId, String errorCode, String errorMessage) {
+        requestRepo.finishRequest(requestId, statusId, errorCode, errorMessage);
+    }
+
+    @Transactional(readOnly = true)
+    public long countAllItems(UUID requestId) {
+        return requestRepo.countAllItems(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public long countSentItems(UUID requestId) {
+        return requestRepo.countSent(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public long countFailedItems(UUID requestId) {
+        return requestRepo.countFailed(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public List<LetterItem> findAllByLetterRequestIds(List<UUID> requestId) {
+        return itemRepo.findAllByLetterRequestIds(requestId);
+    }
+
+}
+
+
+
+//package
 
 
 
