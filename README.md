@@ -58,6 +58,419 @@ export class OdemeMektuplari extends React.Component {
       clearKararNo: false,
       tranState: TRAN_STATES.IDLE,
       clearIhracatciAdi: false,
+      onConfirm: null,
+      selectedRows: [],
+      selectedTaleps: new Set(),
+
+      // Yeni modal state
+      isDetailOpen: false,
+      detailRow: null,
+    };
+
+    this.handlePaginationChange = this.handlePaginationChange.bind(this);
+    this.handlePageSizeChange = this.handlePageSizeChange.bind(this);
+  }
+
+  // --- helpers ---
+
+  handleIhracatciSelect = (ihracatciAdi) => {
+    const ihracatciKodu = (ihracatciAdi.split(' - ')[0] || '').trim();
+    if (ihracatciKodu.length === 10) {
+      this.setState({ searchVkn: ihracatciKodu, searchTckn: '' });
+    } else if (ihracatciKodu.length === 11) {
+      this.setState({ searchTckn: ihracatciKodu, searchVkn: '' });
+    } else {
+      this.setState({ searchTckn: '', searchVkn: '' });
+    }
+  };
+
+  formatDate = (d) => (d && d.format ? d.format('YYYY-MM-DD') : '');
+
+  // --- actions ---
+
+  mektupTalepSearchFunc = () => {
+    this.props.dispatch(
+      mektupTalepSearch(
+        this.props.odemeMektuplari.activePage,
+        this.props.odemeMektuplari.rowCount,
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  mektupEpostaGonderFunc = () => {
+    this.props.dispatch(
+      mektupEpostaGonder(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  mektupYazdirFields = () => {
+    this.props.dispatch(
+      mektupYazdir(
+        this.state.searchKararNo,
+        this.state.searchBelgeTip,
+        this.state.searchBelgeNo,
+        this.state.searchBelgeYil,
+        this.formatDate(this.state.searchOdemeTarih),
+        this.formatDate(this.state.searchOdemeTarihSon),
+        this.state.searchVkn,
+        this.state.searchTckn,
+        this.state.searchMektupTip
+      )
+    );
+  };
+
+  handleSearchIhracatciFields(ihracatciVkn, ihracatciTckn) {
+    this.props.dispatch(searchIhracatci(ihracatciVkn, ihracatciTckn));
+  }
+
+  handleClearMektupFields = () => {
+    this.setState((s) => ({
+      searchKararNo: '',
+      searchBelgeTip: '',
+      searchBelgeNo: '',
+      searchBelgeYil: '',
+      searchOdemeTarih: '',
+      searchOdemeTarihSon: '',
+      searchVkn: '',
+      searchTckn: '',
+      searchMektupTip: '',
+      clearKararNo: !s.clearKararNo,
+      clearIhracatciAdi: !s.clearIhracatciAdi,
+    }));
+    this.props.dispatch(clearIhracatci());
+  };
+
+  // tabloda seçimler
+  handleClearList() {
+    this.setState({ selectedTaleps: new Set(), selectedRows: [] });
+  }
+
+  handleSelectMektupIslemleriFromList(rowsData) {
+    const selectedTaleps = new Set();
+    const selectedItemsSet = new Set();
+
+    rowsData.forEach((rowData) => {
+      selectedTaleps.add(rowData.requestId);
+      selectedItemsSet.add(rowData.id);
+    });
+
+    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
+  }
+
+  handleSelectMektupIslemleri(rowData, checked) {
+    const { selectedTaleps, selectedRows } = this.state;
+    const selectedItemsSet = new Set(selectedRows);
+
+    if (checked) {
+      selectedTaleps.add(rowData.requestId);
+      selectedItemsSet.add(rowData.id);
+    } else {
+      selectedTaleps.delete(rowData.requestId);
+      selectedItemsSet.delete(rowData.id);
+    }
+
+    this.setState({ selectedTaleps, selectedRows: Array.from(selectedItemsSet) });
+  }
+
+  handlePaginationChange(event, { activePage }) {
+    if (activePage !== this.props.odemeMektuplari.activePage) {
+      this.props.odemeMektuplari.activePage = activePage;
+      this.mektupTalepSearchFunc();
+      this.setState({ selectedTaleps: new Set(), selectedRows: [] });
+    }
+  }
+
+  handlePageSizeChange(event, data) {
+    const newPageSize = data.value;
+    const newTotalPages = Math.ceil(this.props.odemeMektuplari.size / newPageSize);
+    const newActivePage = Math.min(newTotalPages, this.props.odemeMektuplari.activePage);
+
+    this.props.odemeMektuplari.rowCount = newPageSize;
+    this.props.odemeMektuplari.totalPages = newTotalPages;
+    this.props.odemeMektuplari.activePage = newActivePage;
+
+    this.mektupTalepSearchFunc();
+    this.setState({ selectedTaleps: new Set() });
+  }
+
+  // --- yeni: çift tıklama ile modal aç
+  handleRowDoubleClick = (rowData) => {
+    this.setState({
+      detailRow: rowData,
+      isDetailOpen: true,
+    });
+  };
+
+  // --- render ---
+
+  render() {
+    return (
+      <div>
+        {this.renderOdemeMektup()}
+        {this.renderCheckProcess()}
+        {this.renderRowDetailModal()}
+      </div>
+    );
+  }
+
+  renderOdemeMektup() {
+    return (
+      <div>
+        {this.renderSearchOdemeMektup()}
+        {this.renderMektupIslemleriTable()}
+      </div>
+    );
+  }
+
+  renderCheckProcess() {
+    const { tranState, onConfirm } = this.state;
+    if (tranState === TRAN_STATES.IDLE) return null;
+
+    return (
+      <Modal open size="tiny">
+        <Modal.Content style={{ minHeight: '120px' }}>
+          <List relaxed size="large">
+            {tranState === TRAN_STATES.WARNING_CHECK && (
+              <List.Item>
+                <List.Icon name="exclamation triangle" color="yellow" />
+                <List.Content>
+                  VKN veya TCKN alanları boş! İşleme devam etmeniz durumunda seçilen tarihe ilişkin tüm ödeme mektupları gönderilecektir. Bu
+                  işleme devam etmek istediğinize emin misiniz?
+                </List.Content>
+                <div style={{ marginTop: '15px', textAlign: 'right' }}>
+                  <Button color="red" onClick={() => this.setState({ tranState: TRAN_STATES.IDLE, onConfirm: null })}>
+                    İptal
+                  </Button>
+                  <Button
+                    color="green"
+                    onClick={() => {
+                      if (typeof onConfirm === 'function') onConfirm();
+                      this.setState({ tranState: TRAN_STATES.IDLE, onConfirm: null });
+                    }}
+                  >
+                    Devam Et
+                  </Button>
+                </div>
+              </List.Item>
+            )}
+          </List>
+        </Modal.Content>
+      </Modal>
+    );
+  }
+
+  renderSearchOdemeMektup = () => (
+    <Segment.Group className="tcmb-datatable">
+      <Segment className="header-segment">
+        <b>Mektup Arama</b>
+      </Segment>
+      <Segment className="table-segment" />
+      <br />
+      {/* Arama alanları burada aynı kaldı */}
+      {/* ... */}
+    </Segment.Group>
+  );
+
+  renderMektupIslemleriTable = () => {
+    const columnsWithMarker = [...MektupMainColumns];
+
+    return (
+      <Segment.Group className="tcmb-datatable">
+        <Segment className="header-segment">
+          <b>Talep Listesi</b>
+        </Segment>
+
+        <DataTable
+          loading={this.props.odemeMektuplari.mektupSearchLoading}
+          columns={columnsWithMarker}
+          resizable
+          getRowKey="requestId"
+          data={this.props.odemeMektuplari.mektupTalepList || []}
+          celled
+          selectable
+          noResultsMessage="Aradığınız kriterlere uygun kayıt bulunamadı"
+          columnMenu
+          export={{ fileName: 'Mektup Talep Islemleri', sheetName: 'Sheet 1', types: ['xlsx'] }}
+          rowSelection="multiple"
+          onRowSelect={this.handleSelectMektupIslemleri}
+          onRowsSelect={(rowsData) => {
+            if (rowsData && rowsData.length > 0) {
+              this.handleSelectMektupIslemleriFromList(rowsData);
+            } else {
+              this.handleClearList();
+            }
+          }}
+          selectedRows={this.state.selectedRows}
+          allRowsSelection
+          page
+          pagination
+          onPageSizeChange={this.handlePageSizeChange}
+          paginationProps={{
+            totalPages: this.props.odemeMektuplari.totalPages,
+            activePage: this.props.odemeMektuplari.activePage,
+            onPageChange: this.handlePaginationChange,
+          }}
+          getRowDetail={(rowData) => (
+            <DataTable
+              getRowKey="itemId"
+              columns={MektupDetayColumns}
+              resizable
+              data={rowData.itemDTOList}
+              celled
+              getRowDetail={(rowData2) => (
+                <DataTable
+                  getRowKey="logId"
+                  columns={MektupDetayLogColumns}
+                  resizable
+                  data={rowData2.notifyLogs}
+                  celled
+                  getRowDetail={(rowLogData) => (
+                    <div>
+                      <p>
+                        <b>{rowLogData.mailBody}</b>
+                      </p>
+                    </div>
+                  )}
+                />
+              )}
+            />
+          )}
+          /** YENİ: satıra çift tıklama */
+          getRowProps={(rowData) => ({
+            onDoubleClick: () => this.handleRowDoubleClick(rowData),
+            style: { cursor: 'pointer' },
+          })}
+        />
+      </Segment.Group>
+    );
+  };
+
+  // Çift tıklama ile açılan modal
+  renderRowDetailModal = () => {
+    const { isDetailOpen, detailRow } = this.state;
+    if (!isDetailOpen) return null;
+
+    return (
+      <Modal open size="large" onClose={() => this.setState({ isDetailOpen: false, detailRow: null })}>
+        <Modal.Header>
+          <b>Talep Detayı</b>
+        </Modal.Header>
+        <Modal.Content>
+          {detailRow ? <ReactJson src={detailRow} name={null} collapsed={2} displayDataTypes={false} /> : null}
+        </Modal.Content>
+        <Modal.Actions>
+          <Button onClick={() => this.setState({ isDetailOpen: false, detailRow: null })}>Kapat</Button>
+        </Modal.Actions>
+      </Modal>
+    );
+  };
+}
+
+OdemeMektuplari.propTypes = {
+  dispatch: PropTypes.func.isRequired,
+  odemeMektuplari: PropTypes.any,
+};
+
+const mapStateToProps = createStructuredSelector({
+  odemeMektuplari: makeSelectOdemeMektuplari(),
+});
+
+function isSearchMektupTipValid(searchMektupTip) {
+  return searchMektupTip === '1' || searchMektupTip === '2' || searchMektupTip === '4';
+}
+
+function mapDispatchToProps(dispatch) {
+  return { dispatch };
+}
+
+const withConnect = connect(mapStateToProps, mapDispatchToProps);
+const withReducer = injectReducer({ key: 'odemeMektuplari', reducer });
+const withSaga = injectSaga({ key: 'odemeMektuplari', saga });
+
+export default compose(withReducer, withSaga, withConnect)(injectIntl(OdemeMektuplari));
+
+
+
+///fena
+/* eslint-disable react/no-is-mounted */
+/**
+ *
+ * OdemeMektuplari
+ *
+ */
+
+import React from 'react';
+import PropTypes from 'prop-types';
+
+import injectSaga from 'utils/injectSaga';
+import injectReducer from 'utils/injectReducer';
+import { injectIntl } from 'react-intl';
+import { connect } from 'react-redux';
+import { compose } from 'redux';
+import { toast } from 'react-toastify';
+
+import { createStructuredSelector } from 'reselect';
+import { Form, DataTable, Button, Segment, Grid, Modal, List } from 'tcmb-ui-components';
+
+import reducer from './redux/reducer';
+import saga from './redux/saga';
+import { mektupTipiOptions, paketTipiOptions } from './redux/utility';
+import {
+  mektupYazdir,
+  searchIhracatci,
+  clearIhracatci,
+  mektupEpostaGonder,
+  mektupTalepSearch,
+} from './redux/actions';
+import makeSelectOdemeMektuplari from './redux/selectors';
+import DropdownKararNo from '../../components/DropdownKararNo';
+import DropdownIhracatci from '../../components/DropdownIhracatci';
+
+import { MektupDetayColumns, MektupDetayLogColumns, MektupMainColumns } from './columns';
+import ReactJson from 'react-json-view';
+
+/* eslint-disable react/prefer-stateless-function */
+const TRAN_STATES = {
+  IDLE: 'IDLE',
+  WARNING_CHECK: 'WARNING_CHECK',
+};
+
+export class OdemeMektuplari extends React.Component {
+  constructor(props) {
+    super(props);
+
+    this.state = {
+      searchKararNo: '',
+      searchBelgeTip: '',
+      searchBelgeNo: '',
+      searchBelgeYil: '',
+      searchOdemeTarih: '',
+      searchOdemeTarihSon: '',
+      searchVkn: '',
+      searchTckn: '',
+      searchMektupTip: '',
+      clearKararNo: false,
+      tranState: TRAN_STATES.IDLE,
+      clearIhracatciAdi: false,
       onConfirm: null, // modal onaylandığında çalıştırılacak aksiyon
       selectedRows: [],
       selectedTaleps: new Set(),
