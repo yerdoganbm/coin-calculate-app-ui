@@ -1,3 +1,78 @@
+package tr.gov.tcmb.ogmdfif.config;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadPoolExecutor;
+
+@Configuration
+public class AsyncConfig {
+
+    @Value("${letterreq.executor.core-pool-size:8}")
+    private int corePoolSize;
+
+    @Value("${letterreq.executor.max-pool-size:8}")
+    private int maxPoolSize;
+
+    @Value("${letterreq.executor.queue-capacity:200}")
+    private int queueCapacity;
+
+    @Value("${letterreq.executor.thread-name-prefix:letter-req-}")
+    private String threadNamePrefix;
+
+    @Bean("letterReqExecutor")
+    public Executor letterReqExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+
+        // **Sabit thread sayısı**: CPU/IO karışık işler için ideal
+        executor.setCorePoolSize(corePoolSize);
+        executor.setMaxPoolSize(maxPoolSize);
+        executor.setQueueCapacity(queueCapacity);
+        executor.setThreadNamePrefix(threadNamePrefix);
+
+        // Uygulama kapanırken aktif thread’leri bekle
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+
+        // Fazla yükte: queue dolarsa yeni görevleri REDDET → güvenli
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+
+        // (Opsiyonel) MDC & SecurityContext propagation — log'lar ve auth kaybolmaz
+        executor.setTaskDecorator(r -> {
+            var mdc = org.slf4j.MDC.getCopyOfContextMap();
+            var secCtx = org.springframework.security.core.context.SecurityContextHolder.getContext();
+            return () -> {
+                try {
+                    if (mdc != null) org.slf4j.MDC.setContextMap(mdc);
+                    org.springframework.security.core.context.SecurityContextHolder.setContext(secCtx);
+                    r.run();
+                } finally {
+                    org.slf4j.MDC.clear();
+                    org.springframework.security.core.context.SecurityContextHolder.clearContext();
+                }
+            };
+        });
+
+        executor.initialize();
+        return executor;
+    }
+}
+
+
+# Thread pool ayarları
+letterreq.executor.core-pool-size=8
+letterreq.executor.max-pool-size=8
+letterreq.executor.queue-capacity=200
+letterreq.executor.thread-name-prefix=letter-req-
+
+# Timeout ayarları (ms cinsinden)
+letterreq.per-task-timeout-ms=3000
+letterreq.global-timeout-ms=10000
+
+
+
 @Override
 public LetterRequestListePageDTO handleGetLetterRequestDtoTransaction(
         int activePage, int pageSize, KararTipiEnum belgeTip,
