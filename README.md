@@ -1,3 +1,13 @@
+
+@Value("${letterreq.per-task-timeout-ms:3000}")
+private long perTaskTimeoutMs;
+
+@Value("${letterreq.global-timeout-ms:10000}")
+private long globalTimeoutMs;
+final Duration perTaskTimeout = Duration.ofMillis(perTaskTimeoutMs);
+final Duration globalTimeout  = Duration.ofMillis(globalTimeoutMs);
+
+
 package tr.gov.tcmb.ogmdfif.config;
 
 import org.springframework.beans.factory.annotation.Value;
