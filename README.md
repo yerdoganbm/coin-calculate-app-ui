@@ -1,6 +1,153 @@
 package tr.gov.tcmb.ogmdfif.service.impl;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.constant.LetterStatusEnum;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
+import tr.gov.tcmb.ogmdfif.service.ItemSender;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.UUID;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class LetterProcessingJob {
+
+    private static final int PICK_LIMIT = 20;
+    private static final int MAX_RETRY = 3;
+
+    private final LetterJobTxService txService;
+    private final ItemSenderFactory itemSenderFactory;
+    private final LetterItemTxService itemTxService;
+
+    @Scheduled(fixedDelayString = "PT1M") // 1 dakika
+    //@SchedulerLock(name = "letterProcessingJob", lockAtLeastFor = "PT20S", lockAtMostFor = "PT5M")
+    public void runBatch() {
+        List<LetterRequest> candidates = txService.findReadyDue(PICK_LIMIT);
+        if (candidates.isEmpty()) {
+            log.debug("No READY requests to process.");
+            return;
+        }
+        log.info("Picked {} request(s) to process", candidates.size());
+
+        for (LetterRequest r : candidates) {
+            try {
+                processOneRequestSafe(r);
+            } catch (Exception e) {
+                log.error("Unexpected error while processing request {}", r.getId(), e);
+            }
+        }
+    }
+
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void processOneRequestSafe(LetterRequest r) {
+        if (!txService.claimRequest(r.getId())) {
+            log.info("Request {} already claimed by another worker.", r.getId());
+            return;
+        }
+
+        long start = System.currentTimeMillis();
+
+        // Item'ları gönder
+        List<LetterItem> items = txService.getItems(r.getId());
+        for(LetterItem item : items) {
+            if (item.getStatusId() != null && (item.getStatusId() == 6 || item.getStatusId() == 7)) continue;
+            processOneItemWithRetry(r, item);
+        }
+
+        // Request final durum
+        updateRequestFinalStatus(r.getId(), start);
+    }
+
+
+    public void processOneItemWithRetry(LetterRequest req, LetterItem item) {
+        short currentAttempts = item.getAttemptCount() == null ? 0 : item.getAttemptCount();
+
+        for (short attemptNo = (short) (currentAttempts + 1); attemptNo <= MAX_RETRY; attemptNo++) {
+            OffsetDateTime started = OffsetDateTime.now();
+            long t0 = System.currentTimeMillis();
+            String errCode = null, errMsg = null;
+            String result = "SUCCESS";
+
+            try {
+                itemTxService.processSingleAttempt(req, item);
+            } catch (Exception e) {
+                result = "FAIL";
+                errCode = e.getClass().getSimpleName();
+                errMsg = safeMsg(e.getMessage());
+            }
+
+            int duration = (int) (System.currentTimeMillis() - t0);
+            itemTxService.saveAttemptLog(req.getId(), item.getId(), attemptNo, started, duration, result, errCode, errMsg);
+
+            if ("SUCCESS".equals(result)) {
+                itemTxService.updateItemStatus(item.getId(), (short) 6, attemptNo, null, null);
+                return;
+            } else {
+                boolean lastTry = (attemptNo == MAX_RETRY);
+                short failStatus = lastTry ? (short) 7 : (short) (item.getStatusId() == null ? 1 : item.getStatusId());
+                itemTxService.updateItemStatus(item.getId(), failStatus, attemptNo, null, null);
+
+                /*if (lastTry) {
+                    txService.updateItemStatus(item.getId(), (short) 7, attemptNo, errCode, errMsg);
+                    return;
+                } else {
+                    txService.updateItemStatus(item.getId(), item.getStatusId() == null ? (short) 1 : item.getStatusId(), attemptNo, errCode, errMsg);
+                }*/
+            }
+        }
+    }
+
+    private void updateRequestFinalStatus(UUID requestId, long startMillis) {
+        long total = txService.countAllItems(requestId);
+        long sent = txService.countSentItems(requestId);
+        long fail = txService.countFailedItems(requestId);
+
+        short status;
+        String code, msg = null;
+
+        if (total == 0) {
+            status = Short.parseShort(LetterStatusEnum.NO_ITEMS.getKod());
+            code = LetterStatusEnum.NO_ITEMS.getAdi();
+            msg = "Taleple ilgili detay kayıt bulunmamaktadır.";
+        } else if (sent == total) {
+            status = Short.parseShort(LetterStatusEnum.SENT.getKod()); // SENT
+            code = LetterStatusEnum.SENT.name();
+        } else if (sent > 0 && fail > 0 && (sent+fail == total)) {
+            status = Short.parseShort(LetterStatusEnum.PARTIAL_SENT.getKod());;
+            code = LetterStatusEnum.PARTIAL_SENT.getAdi();
+            msg = String.format("%d/%d detay kayıt başarısızlıkla sonuçlandı.", fail, total);
+        } else if(fail == total) {
+            status = Short.parseShort(LetterStatusEnum.ALL_FAILED.getKod());
+            code = LetterStatusEnum.ALL_FAILED.name();
+            msg = String.format("%d detay kayıt başarısızlıkla sonuçlandı.(Tümü)", total);
+        }else{
+            status = Short.parseShort(LetterStatusEnum.PROCESSING.getKod());;
+            code = LetterStatusEnum.PROCESSING.getAdi();
+        }
+
+        txService.finishRequest(requestId, status, code, msg);
+        log.info("Request {} finished in {} ms → status={}, sent={}/{}", requestId,
+                (System.currentTimeMillis() - startMillis), status, sent, total);
+    }
+
+    private String safeMsg(String s) {
+        if (s == null) return null;
+        return s.length() > 4000 ? s.substring(0, 4000) : s;
+    }
+}
+
+////jobbb
+package tr.gov.tcmb.ogmdfif.service.impl;
+
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tr.gov.tcmb.ogmdfif.model.entity.LetterAttempt;
