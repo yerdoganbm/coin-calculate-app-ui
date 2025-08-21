@@ -1,3 +1,172 @@
+
+package tr.gov.tcmb.ogmdfif.service.impl;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.constant.LetterStatusEnum;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.UUID;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class LetterProcessingJob {
+
+    private static final int PICK_LIMIT = 20;
+    private static final int MAX_RETRY   = 3;
+
+    private final LetterJobTxService txService;
+    private final LetterItemTxService itemTxService;
+
+    @Scheduled(fixedDelayString = "PT1M") // 1 dakika
+    // @SchedulerLock(name = "letterProcessingJob", lockAtLeastFor = "PT20S", lockAtMostFor = "PT5M")
+    public void runBatch() {
+        List<LetterRequest> candidates = txService.findReadyDue(PICK_LIMIT);
+        if (candidates.isEmpty()) {
+            log.debug("No READY requests to process.");
+            return;
+        }
+        log.info("Picked {} request(s) to process", candidates.size());
+
+        for (LetterRequest r : candidates) {
+            try {
+                processOneRequestSafe(r);
+            } catch (Exception e) {
+                log.error("Unexpected error while processing request {}", r.getId(), e);
+            }
+        }
+    }
+
+    /**
+     * Üst seviye transaction'ı kapat: item'lar bağımsız REQUIRES_NEW ile çalışsın,
+     * Persistence Context tutulmasın → stale snapshot problemi biter.
+     */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void processOneRequestSafe(LetterRequest r) {
+        if (!txService.claimRequest(r.getId())) {
+            log.info("Request {} already claimed by another worker.", r.getId());
+            return;
+        }
+
+        long start = System.currentTimeMillis();
+
+        // === IMPORTANT: Item'ları entity olarak değil, sadece ID'leriyle dolaş ===
+        List<Long> itemIds = txService.getItemIds(r.getId());
+
+        for (Long itemId : itemIds) {
+            // Durumu DB'den taze oku (entity cache yok)
+            Short statusId = txService.getStatusId(itemId);
+            if (statusId != null && (statusId == 6 || statusId == 7)) continue; // final ise atla
+            processOneItemWithRetry(r, itemId);
+        }
+
+        // Request final durumunu DB'den taze sayımla güncelle
+        updateRequestFinalStatus(r.getId(), start);
+    }
+
+    /**
+     * Her deneme REQUIRES_NEW içinde: bir deneme/kalem fail olursa diğerleri etkilenmez.
+     * ID ile çalışarak stale entity problemini tamamen ortadan kaldırıyoruz.
+     */
+    public void processOneItemWithRetry(LetterRequest req, Long itemId) {
+        short currentAttempts = txService.getAttemptCount(itemId) == null ? 0 : txService.getAttemptCount(itemId);
+
+        for (short attemptNo = (short) (currentAttempts + 1); attemptNo <= MAX_RETRY; attemptNo++) {
+            OffsetDateTime started = OffsetDateTime.now();
+            long t0 = System.currentTimeMillis();
+            String errCode = null, errMsg = null;
+            String result  = "SUCCESS";
+
+            try {
+                // REQUIRES_NEW içinde tek attempt çalışır (LetterItemTxService tarafında)
+                itemTxService.processSingleAttempt(req, itemId);
+            } catch (Exception e) {
+                result  = "FAIL";
+                errCode = e.getClass().getSimpleName();
+                errMsg  = safeMsg(e.getMessage());
+            }
+
+            int duration = (int) (System.currentTimeMillis() - t0);
+            itemTxService.saveAttemptLog(req.getId(), itemId, attemptNo, started, duration, result, errCode, errMsg);
+
+            if ("SUCCESS".equals(result)) {
+                // 6 = SUCCESS/SENT
+                itemTxService.updateItemStatus(itemId, (short) 6, attemptNo, null, null);
+                return;
+            } else {
+                boolean lastTry = (attemptNo == MAX_RETRY);
+
+                // Ara denemelerde "pending"i koru; son denemede 7 = FINAL_FAIL
+                short nextStatus;
+                if (lastTry) {
+                    nextStatus = 7;
+                } else {
+                    Short cur = txService.getStatusId(itemId); // DB'den taze oku
+                    nextStatus = (cur == null || cur == 0) ? 1 : cur; // 1 = PROCESSING/RETRY gibi
+                }
+
+                // HATA BİLGİSİNİ YAZ (önceki sürümde null gönderiliyordu)
+                itemTxService.updateItemStatus(itemId, nextStatus, attemptNo, errCode, errMsg);
+
+                if (lastTry) return; // final fail oldu, daha deneme yok
+            }
+        }
+    }
+
+    /**
+     * Final: atomik kural → pending varsa PROCESSING, hepsi final ise
+     * hepsi success → SENT, hepsi fail → ALL_FAILED, karışık → PARTIAL_SENT
+     */
+    private void updateRequestFinalStatus(UUID requestId, long startMillis) {
+        long total = txService.countAllItems(requestId);
+        long sent  = txService.countSentItems(requestId);
+        long fail  = txService.countFailedItems(requestId);
+
+        short status;
+        String code;
+        String msg = null;
+
+        if (total == 0) {
+            status = Short.parseShort(LetterStatusEnum.NO_ITEMS.getKod());
+            code   = LetterStatusEnum.NO_ITEMS.getAdi();
+            msg    = "Taleple ilgili detay kayıt bulunmamaktadır.";
+        } else if (sent == total) {
+            status = Short.parseShort(LetterStatusEnum.SENT.getKod());
+            code   = LetterStatusEnum.SENT.name();
+        } else if (fail == total) {
+            status = Short.parseShort(LetterStatusEnum.ALL_FAILED.getKod());
+            code   = LetterStatusEnum.ALL_FAILED.name();
+            msg    = String.format("%d detay kayıt başarısızlıkla sonuçlandı. (Tümü)", total);
+        } else if (sent + fail == total) { // hepsi final, karışık
+            status = Short.parseShort(LetterStatusEnum.PARTIAL_SENT.getKod());
+            code   = LetterStatusEnum.PARTIAL_SENT.getAdi();
+            msg    = String.format("%d/%d detay kayıt başarısızlıkla sonuçlandı.", fail, total);
+        } else {
+            status = Short.parseShort(LetterStatusEnum.PROCESSING.getKod()); // pending var
+            code   = LetterStatusEnum.PROCESSING.getAdi();
+        }
+
+        txService.finishRequest(requestId, status, code, msg);
+        log.info("Request {} finished in {} ms → status={}, sent/fail/total={}/{}/{}",
+                requestId, (System.currentTimeMillis() - startMillis), status, sent, fail, total);
+    }
+
+    private String safeMsg(String s) {
+        if (s == null) return null;
+        return s.length() > 4000 ? s.substring(0, 4000) : s;
+    }
+}
+
+
+
+//job22
 package tr.gov.tcmb.ogmdfif.service.impl;
 
 import lombok.RequiredArgsConstructor;
