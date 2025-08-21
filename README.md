@@ -1,4 +1,115 @@
+package tr.gov.tcmb.ogmdfif.service.impl;
 
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterAttempt;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
+import tr.gov.tcmb.ogmdfif.repository.LetterAttemptRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterItemRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+
+
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import java.time.OffsetDateTime;
+import java.util.List;
+
+import java.util.Map;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+public class LetterJobTxService {
+
+    private static final int BATCH_FLUSH_SIZE = 100;
+    private final LetterRequestRepository requestRepo;
+    private final LetterItemRepository itemRepo;
+    private final LetterAttemptRepository attemptRepo;
+
+    @PersistenceContext
+    private EntityManager em;
+
+    @Transactional(readOnly = true)
+    public List<LetterRequest> findReadyDue(int limit) {
+        return requestRepo.findReadyDue(limit);
+    }
+
+    @Transactional
+    public boolean claimRequest(UUID requestId) {
+        return requestRepo.markProcessing(requestId) > 0;
+    }
+
+    @Transactional
+    public void insertItemIfNotExists(UUID id,UUID requestId, String receiverKey, String receiverValue) {
+        itemRepo.insertIfNotExists(id,requestId, receiverKey, receiverValue);
+    }
+
+    @Transactional
+    public List<LetterItem> getItems(UUID requestId) {
+        return itemRepo.findAllByRequestId(requestId);
+    }
+
+    @Transactional
+    public void updateItemStatus(UUID itemId, short statusId, short attemptCount, String errorCode, String errorMessage) {
+        itemRepo.updateStatus(itemId, statusId, attemptCount, errorCode, errorMessage);
+    }
+
+    @Transactional
+    public void logAttempt(UUID id,UUID requestId, UUID itemId, short attemptNo,
+                           OffsetDateTime startedAt, OffsetDateTime finishedAt, int durationMs,
+                           String result, String errorCode, String errorMessage) {
+        attemptRepo.insertAttempt(id,requestId, itemId, attemptNo, startedAt, finishedAt, durationMs, result, errorCode, errorMessage);
+    }
+
+    @Transactional
+    public void finishRequest(UUID requestId, short statusId, String errorCode, String errorMessage) {
+        requestRepo.finishRequest(requestId, statusId, errorCode, errorMessage);
+    }
+
+    @Transactional(readOnly = true)
+    public long countAllItems(UUID requestId) {
+        return requestRepo.countAllItems(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public long countSentItems(UUID requestId) {
+        return requestRepo.countSent(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public long countFailedItems(UUID requestId) {
+        return requestRepo.countFailed(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public List<LetterItem> findAllByLetterRequestIds(List<UUID> requestId) {
+        return itemRepo.findAllByLetterRequestIds(requestId);
+    }
+
+    @Transactional
+    public void insertLetterItemsBatch(final UUID requestId, final Map<String,String> receivers){
+        int i=0;
+        for(Map.Entry<String,String> entry : receivers.entrySet()){
+            final UUID itemId = UUID.randomUUID();
+            insertItemIfNotExists(itemId,requestId,entry.getKey(),entry.getValue());
+            
+            if((++i % BATCH_FLUSH_SIZE) == 0){
+                em.flush();
+                em.clear();
+            }
+        }
+        em.flush();
+        em.clear();
+    }
+
+}
+
+
+
+
+///fenaaa
 package tr.gov.tcmb.ogmdfif.service.impl;
 
 import lombok.RequiredArgsConstructor;
