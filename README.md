@@ -10,6 +10,77 @@ import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
 import java.util.List;
 import java.util.UUID;
 
+@Repository
+public interface LetterItemRepository extends JpaRepository<LetterItem, UUID> {
+
+    /* --- Mevcut (entity bazlı) --- */
+    @Query(value = "SELECT * FROM ogmdfifodm.tletter_item WHERE request_id = :requestId", nativeQuery = true)
+    List<LetterItem> findAllByRequestId(@Param("requestId") UUID requestId);
+
+    /* --- ID ile dolaşmak için hafif sorgular --- */
+    @Query(value = "SELECT id FROM ogmdfifodm.tletter_item WHERE request_id = :requestId", nativeQuery = true)
+    List<UUID> findIdsByRequestId(@Param("requestId") UUID requestId);
+
+    @Query(value = "SELECT attempt_count FROM ogmdfifodm.tletter_item WHERE id = :itemId", nativeQuery = true)
+    Short getAttemptCount(@Param("itemId") UUID itemId);
+
+    @Query(value = "SELECT status_id FROM ogmdfifodm.tletter_item WHERE id = :itemId", nativeQuery = true)
+    Short getStatusId(@Param("itemId") UUID itemId);
+
+    /* --- Ekleme: gerçekten 'if not exists' olsun --- */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+        INSERT INTO ogmdfifodm.tletter_item
+            (id, request_id, receiver_key, payload_ref, status_id, attempt_count, created_at, updated_at)
+        VALUES
+            (:id, :requestId, :receiverKey, :payloadRef, 1, 0, now(), now())
+        ON CONFLICT (id) DO NOTHING
+        """,
+        nativeQuery = true)
+    int insertIfNotExists(@Param("id") UUID id,
+                          @Param("requestId") UUID requestId,
+                          @Param("receiverKey") String receiverKey,
+                          @Param("payloadRef") String payloadRef);
+
+    /* --- Durum güncelleme: ara/son deneme bilgileri anında görünür olsun --- */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+        UPDATE ogmdfifodm.tletter_item
+           SET status_id        = :statusId,
+               attempt_count    = :attemptCount,
+               last_error_code  = :errorCode,
+               last_error_message = :errorMessage,
+               sent_at          = CASE WHEN :statusId = 6 THEN now() ELSE sent_at END,
+               updated_at       = now()
+         WHERE id = :itemId
+        """,
+        nativeQuery = true)
+    int updateStatus(@Param("itemId") UUID itemId,
+                     @Param("statusId") short statusId,
+                     @Param("attemptCount") short attemptCount,
+                     @Param("errorCode") String errorCode,
+                     @Param("errorMessage") String errorMessage);
+
+    /* --- Mevcut (liste) --- */
+    @Query("select li from LetterItem li where li.requestId in :letterRequestIds")
+    List<LetterItem> findAllByLetterRequestIds(@Param("letterRequestIds") List<UUID> letterRequestIds);
+}
+
+///
+
+
+package tr.gov.tcmb.ogmdfif.repository;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterItem;
+
+import java.util.List;
+import java.util.UUID;
+
 
 @Repository
 public interface LetterItemRepository extends JpaRepository<LetterItem, UUID> {
