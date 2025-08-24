@@ -1,5 +1,572 @@
 package tr.gov.tcmb.ogmdfif.service.handler;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.test.util.ReflectionTestUtils;
+import tr.gov.tcmb.ogmdfif.model.dto.*;
+import tr.gov.tcmb.ogmdfif.exception.ValidationException;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.repository.EftBilgisiYonetimArsivRepository;
+import tr.gov.tcmb.ogmdfif.repository.EftBilgisiYonetimRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+import tr.gov.tcmb.ogmdfif.repository.ProvizyonArsivIslemleriRepository;
+import tr.gov.tcmb.ogmdfif.service.*;
+import tr.gov.tcmb.ogmdfif.service.event.LetterRequestCreatedEvent;
+import tr.gov.tcmb.ogmdfif.service.impl.LetterJobTxService;
+import tr.gov.tcmb.ogmdfif.constant.*;
+import tr.gov.tcmb.ogmdfif.util.DateUtils;
+import tr.gov.tcmb.ogmdfif.util.SAMUtils;
+import tr.gov.tcmb.submuhm.pikur.model.veri.DocGrupVeri;
+import tr.gov.tcmb.submuhm.pikur.model.veri.DocVeri;
+import tr.gov.tcmb.submuhm.pikur.service.PikurIslemService;
+
+import javax.print.attribute.standard.OrientationRequested;
+import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@SpringBootTest
+@ExtendWith(MockitoExtension.class)
+class OdemeMektupLetterHandlerTest {
+
+    @InjectMocks
+    private OdemeMektupLetterHandler handler;
+
+    // Mock all dependencies
+    @Mock
+    private ProvizyonIslemleriService provizyonIslemleriService;
+    @Mock
+    private KararIslemleriService kararIslemleriService;
+    @Mock
+    private OrtakMektupIslemlerService ortakMektupIslemlerService;
+    @Mock
+    private EftBilgisiYonetimArsivRepository eftBilgisiYonetimArsivRepository;
+    @Mock
+    private ProvizyonArsivIslemleriRepository provizyonArsivIslemleriRepository;
+    @Mock
+    private BorcBilgiService borcBilgiService;
+    @Mock
+    private PikurIslemService pikurIslemService;
+    @Mock
+    private BankaSubeService bankaSubeService;
+    @Mock
+    private EftBilgisiYonetimRepository eftBilgisiYonetimRepository;
+    @Mock
+    private LetterRequestRepository letterRequestRepo;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+    @Mock
+    private LetterRequestConverterService letterRequestConverter;
+    @Mock
+    private LetterJobTxService jobTxService;
+    @Mock
+    private LetterItemConverterService letterItemConverter;
+    @Mock
+    private KullaniciBilgileriService kullaniciBilgileriService;
+    @Mock
+    private LetterRequestTransactionService letterRequestTransactionService;
+    @Mock
+    private LetterNotificationLogConverterService letterNotificationLogConverterService;
+    @Mock
+    private LetterNotificationLogService letterNotificationLogService;
+    @Mock
+    private MailFacade mailFacade;
+    @Mock
+    private Executor letterReqExecutor;
+
+    private LetterRequestDto validDto;
+    private LetterRequest letterRequest;
+    private LetterItem letterItem;
+    private Provizyon provizyon;
+    private ProvizyonArsiv provizyonArsiv;
+    private Ihracatci ihracatci;
+    private Karar karar;
+
+    @BeforeEach
+    void setUp() {
+        // Set up a valid DTO for testing
+        validDto = new LetterRequestDto();
+        validDto.setFirstPaymentDate("2023-01-01");
+        validDto.setLastPaymentDate("2023-01-02");
+        validDto.setRequestTypeId("1");
+        validDto.setVkn("test-vkn");
+        
+        // Set field values using reflection
+        ReflectionTestUtils.setField(handler, "perTaskTimeoutMs", 3000L);
+        ReflectionTestUtils.setField(handler, "globalTimeoutMs", 10000L);
+        
+        // Initialize test entities
+        letterRequest = new LetterRequest();
+        letterRequest.setId(UUID.randomUUID());
+        letterRequest.setStatusId((short) 1);
+        
+        letterItem = new LetterItem();
+        letterItem.setId(UUID.randomUUID());
+        letterItem.setReceiverKey("123");
+        letterItem.setRequestId(letterRequest.getId());
+        
+        ihracatci = new Ihracatci();
+        ihracatci.setEmail("test@example.com");
+        ihracatci.setAd("Test İhracatçı");
+        ihracatci.setAdres("Test Adres 123");
+        
+        karar = new Karar();
+        karar.setKararNo("KARAR-123");
+        karar.setAd("Test Karar");
+        karar.setSubeId(SubeKoduEnum.IDARE_MERKEZI.getSubeId());
+        karar.setTip(KararTipiEnum.TARIMSAL.getKod());
+        karar.setNakitKarar(true);
+        
+        provizyon = new Provizyon();
+        provizyon.setId(123L);
+        provizyon.setIhracatci(ihracatci);
+        provizyon.setKarar(karar);
+        provizyon.setTutar(new BigDecimal("1000.00"));
+        provizyon.setOdemeTarih(new Date());
+        
+        provizyonArsiv = new ProvizyonArsiv();
+        provizyonArsiv.setId(456L);
+        provizyonArsiv.setIhracatci(ihracatci);
+        provizyonArsiv.setKarar(karar);
+        provizyonArsiv.setOdemeTarih(new Date());
+    }
+
+    @Test
+    void validate_ShouldThrowException_WhenFirstPaymentDateIsNull() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setLastPaymentDate("2023-01-02");
+        
+        Exception exception = assertThrows(IllegalArgumentException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "validate", dto));
+        
+        assertEquals("İlk ve son ödeme tarihi zorunludur.", exception.getMessage());
+    }
+
+    @Test
+    void validate_ShouldThrowException_WhenDatesHaveMoreThan2DaysDifference() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setFirstPaymentDate("2023-01-01");
+        dto.setLastPaymentDate("2023-01-04");
+        
+        Exception exception = assertThrows(IllegalArgumentException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "validate", dto));
+        
+        assertEquals("Tarihler arasındaki fark en fazla 2 gün olabilir.", exception.getMessage());
+    }
+
+    @Test
+    void validate_ShouldNotThrow_WhenValidRequest() {
+        assertDoesNotThrow(() -> ReflectionTestUtils.invokeMethod(handler, "validate", validDto));
+    }
+
+    @Test
+    void handleRequest_ShouldReturnUUID_WhenValidRequest() throws Exception {
+        // Mock dependencies
+        when(letterRequestConverter.doConvertToDto(any(), any())).thenReturn(letterRequest);
+        when(letterRequestRepo.save(any())).thenReturn(letterRequest);
+        when(kullaniciBilgileriService.getKullaniciSubeId()).thenReturn("test-branch");
+        
+        // Mock SAMUtils static method
+        try (var mockedSAMUtils = mockStatic(SAMUtils.class)) {
+            mockedSAMUtils.when(SAMUtils::getSimdikiKullaniciSicili).thenReturn("test-user");
+            
+            UUID result = handler.handleRequest(validDto, "test-user", "test-branch");
+            
+            assertNotNull(result);
+            verify(letterRequestRepo, times(1)).save(any());
+            verify(eventPublisher, times(1)).publishEvent(any(LetterRequestCreatedEvent.class));
+            verify(jobTxService, times(1)).insertLetterItemsBatch(any(), any());
+        }
+    }
+
+    @Test
+    void handleRequest_ShouldThrowException_WhenValidationFails() {
+        LetterRequestDto invalidDto = new LetterRequestDto();
+        
+        assertThrows(Exception.class, 
+            () -> handler.handleRequest(invalidDto, "test-user", "test-branch"));
+    }
+
+    @Test
+    void nakitKontrolYap_ShouldThrowException_WhenKararNotFound() {
+        when(kararIslemleriService.getKararByKararNoAndSube(any(), any())).thenReturn(null);
+        
+        Exception exception = assertThrows(ValidationException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "nakitKontrolYap", "test-karar"));
+        
+        assertTrue(exception.getMessage().contains("Aradığınız karar bulunamamıştır"));
+    }
+
+    @Test
+    void nakitKontrolYap_ShouldThrowException_WhenNotNakitKarar() {
+        karar.setNakitKarar(false);
+        when(kararIslemleriService.getKararByKararNoAndSube(any(), any())).thenReturn(karar);
+        
+        Exception exception = assertThrows(ValidationException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "nakitKontrolYap", "test-karar"));
+        
+        assertTrue(exception.getMessage().contains("Ödeme mektupları sadece nakit ödemeler için üretilmektedir"));
+    }
+
+    @Test
+    void nakitKontrolYap_ShouldNotThrow_WhenValidNakitKarar() {
+        when(kararIslemleriService.getKararByKararNoAndSube(any(), any())).thenReturn(karar);
+        
+        assertDoesNotThrow(() -> ReflectionTestUtils.invokeMethod(handler, "nakitKontrolYap", "test-karar"));
+    }
+
+    @Test
+    void handleInitialLetterRequestTransaction_ShouldReturnUUID_WhenValidInput() throws Exception {
+        // Mock dependencies
+        when(kullaniciBilgileriService.getKullaniciSubeId()).thenReturn("test-branch");
+        when(letterRequestConverter.doConvertToDto(any(), any())).thenReturn(letterRequest);
+        when(letterRequestRepo.save(any())).thenReturn(letterRequest);
+        
+        // Mock SAMUtils static method
+        try (var mockedSAMUtils = mockStatic(SAMUtils.class)) {
+            mockedSAMUtils.when(SAMUtils::getSimdikiKullaniciSicili).thenReturn("test-user");
+            
+            UUID result = handler.handleInitialLetterRequestTransaction(
+                KararTipiEnum.TARIMSAL, 123, 2023, "karar-123",
+                LocalDate.of(2023, 1, 1), LocalDate.of(2023, 1, 2),
+                "vkn123", null, MektupTipEnum.ODEME_MEKTUPLARI
+            );
+            
+            assertNotNull(result);
+        }
+    }
+
+    @Test
+    void testOutputAsPDF() {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        baos.write("test content".getBytes());
+        
+        ExportedFile result = ReflectionTestUtils.invokeMethod(
+            handler, "outputAsPDF", baos, "test-file");
+        
+        assertNotNull(result);
+        assertEquals("test-file", result.getFileName());
+        assertArrayEquals("test content".getBytes(), result.getData());
+        assertEquals("application/pdf", result.getMimeType());
+    }
+
+    @Test
+    void validate_ShouldThrowException_WhenBothVknAndTcknProvided() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setFirstPaymentDate("2023-01-01");
+        dto.setLastPaymentDate("2023-01-02");
+        dto.setRequestTypeId("1");
+        dto.setVkn("test-vkn");
+        dto.setTckn("test-tckn");
+        
+        Exception exception = assertThrows(IllegalArgumentException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "validate", dto));
+        
+        assertEquals("VKN ve TCKN aynı anda gönderilemez. Tekil işlemde birini gönderin.", exception.getMessage());
+    }
+
+    @Test
+    void validate_ShouldThrowException_WhenRequestTypeIdIsNull() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setFirstPaymentDate("2023-01-01");
+        dto.setLastPaymentDate("2023-01-02");
+        
+        Exception exception = assertThrows(IllegalArgumentException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "validate", dto));
+        
+        assertEquals("mektupTip zorunludur.", exception.getMessage());
+    }
+
+    @Test
+    void letterRequestProcessingStart_ShouldCallCorrectMethod_WhenOdemeTarihiMilattanSonra() throws Exception {
+        // Mock DateUtils
+        try (var mockedDateUtils = mockStatic(DateUtils.class)) {
+            mockedDateUtils.when(() -> DateUtils.odemeTarihiMilattanSonraMi(any())).thenReturn(true);
+            
+            // Mock nakitKontrolYap
+            when(kararIslemleriService.getKararByKararNoAndSube(any(), any())).thenReturn(karar);
+            
+            handler.letterRequestProcessingStart(letterRequest, letterItem);
+            
+            verify(handler, times(1)).mailAdresiOlanIhracatcilaraOdemeMektuplariGonder(any(), any());
+        }
+    }
+
+    @Test
+    void letterRequestProcessingStart_ShouldCallCorrectMethod_WhenOdemeTarihiMilattanOnce() throws Exception {
+        // Mock DateUtils
+        try (var mockedDateUtils = mockStatic(DateUtils.class)) {
+            mockedDateUtils.when(() -> DateUtils.odemeTarihiMilattanSonraMi(any())).thenReturn(false);
+            
+            // Mock nakitKontrolYap
+            when(kararIslemleriService.getKararByKararNoAndSube(any(), any())).thenReturn(karar);
+            
+            handler.letterRequestProcessingStart(letterRequest, letterItem);
+            
+            verify(handler, times(1)).mailAdresiOlanIhracatcilaraOdemeMektuplariGonderArsiv(any(), any());
+        }
+    }
+
+    @Test
+    void handleLetterTransactions_ShouldReturnProvizyonMap_WhenOdemeTarihiMilattanSonra() throws Exception {
+        // Mock DateUtils
+        try (var mockedDateUtils = mockStatic(DateUtils.class)) {
+            mockedDateUtils.when(() -> DateUtils.odemeTarihiMilattanSonraMi(any())).thenReturn(true);
+            
+            // Mock provizyon list
+            List<Provizyon> provizyonList = Arrays.asList(provizyon);
+            when(provizyonIslemleriService.listProvizyon(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(provizyonList);
+            when(provizyonIslemleriService.getSubeIdList()).thenReturn(Arrays.asList("1", "2"));
+            
+            Map<String, String> result = handler.handleLetterTransactions(letterRequest);
+            
+            assertNotNull(result);
+            assertTrue(result.containsKey("123"));
+        }
+    }
+
+    @Test
+    void handleLetterTransactions_ShouldReturnProvizyonArsivMap_WhenOdemeTarihiMilattanOnce() throws Exception {
+        // Mock DateUtils
+        try (var mockedDateUtils = mockStatic(DateUtils.class)) {
+            mockedDateUtils.when(() -> DateUtils.odemeTarihiMilattanSonraMi(any())).thenReturn(false);
+            
+            // Mock provizyon arşiv list
+            List<ProvizyonArsiv> provizyonArsivList = Arrays.asList(provizyonArsiv);
+            when(provizyonIslemleriService.listProvizyonArsiv(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(provizyonArsivList);
+            when(provizyonIslemleriService.getSubeIdList()).thenReturn(Arrays.asList("1", "2"));
+            
+            Map<String, String> result = handler.handleLetterTransactions(letterRequest);
+            
+            assertNotNull(result);
+            assertTrue(result.containsKey("456"));
+        }
+    }
+
+    @Test
+    void mailAdresiOlanIhracatcilaraOdemeMektuplariGonder_ShouldHandleNullProvizyon() throws Exception {
+        when(provizyonIslemleriService.getProvizyonById(any())).thenReturn(null);
+        
+        handler.mailAdresiOlanIhracatcilaraOdemeMektuplariGonder(letterRequest, letterItem);
+        
+        verify(ortakMektupIslemlerService, times(1)).sendDesicionLetterEmail(
+            eq(null), eq(null), eq(null), anyString(), eq(letterRequest), eq(letterItem), eq(MailTypeEnum.HATA_BILDIRIMI));
+    }
+
+    @Test
+    void mailAdresiOlanIhracatcilaraOdemeMektuplariGonder_ShouldHandleEmptyBorcMap() throws Exception {
+        when(provizyonIslemleriService.getProvizyonById(any())).thenReturn(provizyon);
+        when(borcBilgiService.getBorcBilgiByProvizyonIdListWithoutIslemDurum(any()))
+            .thenReturn(new ArrayList<>());
+        
+        handler.mailAdresiOlanIhracatcilaraOdemeMektuplariGonder(letterRequest, letterItem);
+        
+        verify(ortakMektupIslemlerService, times(1)).sendDesicionLetterEmail(
+            eq(null), eq(null), eq(null), anyString(), eq(letterRequest), eq(letterItem), eq(MailTypeEnum.HATA_BILDIRIMI));
+    }
+
+    @Test
+    void islemYapOdemeMektuplari_ShouldThrowException_WhenInvalidProvizyon() throws Exception {
+        Provizyon invalidProvizyon = new Provizyon();
+        List<BorcBilgi> borcBilgis = Arrays.asList(new BorcBilgi());
+        
+        Exception exception = assertThrows(ValidationException.class, 
+            () -> handler.islemYapOdemeMektuplari(invalidProvizyon, borcBilgis, letterRequest, letterItem));
+        
+        assertTrue(exception.getMessage().contains("gerekli ihracatçı bilgileri eksiktir"));
+    }
+
+    @Test
+    void islemYapOdemeMektuplari_ShouldThrowException_WhenEmptyProvizyonVeri() throws Exception {
+        when(pikurIslemService.xmlYukle(anyString())).thenReturn(null);
+        when(pikurIslemService.pdfDocOlustur(any(), any(), any(), any())).thenReturn(new ByteArrayOutputStream());
+        
+        List<BorcBilgi> borcBilgis = Arrays.asList(new BorcBilgi());
+        
+        Exception exception = assertThrows(ValidationException.class, 
+            () -> handler.islemYapOdemeMektuplari(provizyon, borcBilgis, letterRequest, letterItem));
+        
+        assertTrue(exception.getMessage().contains("gerekli provizyon bilgileri eksiktir"));
+    }
+
+    @Test
+    void handleGetLetterRequestDtoTransaction_ShouldReturnPageDTO() throws Exception {
+        // Mock dependencies
+        when(letterRequestTransactionService.listLetterRequest(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(Arrays.asList(letterRequest));
+        when(letterRequestTransactionService.loadItemByLetterRequestIds(any()))
+            .thenReturn(Collections.singletonMap(letterRequest.getId(), Arrays.asList(letterItem)));
+        when(letterNotificationLogService.getLetterNotificationLogRecords(anyString(), any()))
+            .thenReturn(new ArrayList<>());
+        
+        // Mock executor to run tasks synchronously for testing
+        when(letterReqExecutor.execute(any())).thenAnswer(invocation -> {
+            Runnable task = invocation.getArgument(0);
+            task.run();
+            return null;
+        });
+        
+        LetterRequestListePageDTO result = handler.handleGetLetterRequestDtoTransaction(
+            1, 10, KararTipiEnum.TARIMSAL, 123, 2023, "karar-123",
+            LocalDate.of(2023, 1, 1), LocalDate.of(2023, 1, 2), "vkn123", null, MektupTipEnum.ODEME_MEKTUPLARI);
+        
+        assertNotNull(result);
+        assertEquals(1, result.getTotalPages());
+    }
+
+    @Test
+    void getOdemeMektupDetayByProvizyon_ShouldReturnDocGrupVeriList() {
+        // Mock borc bilgileri
+        List<DocGrupVeri> borcVerileri = Arrays.asList(new DocGrupVeri());
+        when(handler.getOdemeMektupBorcBilgileri(any(), anyBoolean())).thenReturn(borcVerileri);
+        
+        List<DocGrupVeri> result = handler.getOdemeMektupDetayByProvizyon(provizyon);
+        
+        assertNotNull(result);
+        assertFalse(result.isEmpty());
+    }
+
+    @Test
+    void getOdemeMektupDetayByProvizyon_ShouldReturnEmptyList_WhenNoBorcBilgileri() {
+        when(handler.getOdemeMektupBorcBilgileri(any(), anyBoolean())).thenReturn(new ArrayList<>());
+        
+        List<DocGrupVeri> result = handler.getOdemeMektupDetayByProvizyon(provizyon);
+        
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void getOdemeMektupBorcBilgileri_ShouldReturnEmptyList_WhenNoEftBilgiYonetim() {
+        when(eftBilgisiYonetimRepository.getEftBilgiYonetimsByProvizyonId(any())).thenReturn(new ArrayList<>());
+        
+        List<DocGrupVeri> result = handler.getOdemeMektupBorcBilgileri(provizyon, false);
+        
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void handleExportFileName_ShouldReturnCorrectFormat() {
+        LocalDate ilkOdemeTarihi = LocalDate.of(2023, 1, 1);
+        LocalDate sonOdemeTarihi = LocalDate.of(2023, 1, 2);
+        MektupTipEnum mektupTip = MektupTipEnum.ODEME_MEKTUPLARI;
+        
+        String result = handler.handleExportFileName(ilkOdemeTarihi, sonOdemeTarihi, mektupTip);
+        
+        assertEquals("01/01/2023_02/01/2023_Ödeme Mektupları", result);
+    }
+
+    @Test
+    void insertLetterItem_ShouldCallJobTxService_WhenReceiversExist() throws Exception {
+        Map<String, String> receivers = new HashMap<>();
+        receivers.put("key", "value");
+        
+        when(handler.handleLetterTransactions(any())).thenReturn(receivers);
+        
+        handler.insertLetterItem(letterRequest);
+        
+        verify(jobTxService, times(1)).insertLetterItemsBatch(any(), eq(receivers));
+    }
+
+    @Test
+    void insertLetterItem_ShouldFinishRequest_WhenNoReceivers() throws Exception {
+        when(handler.handleLetterTransactions(any())).thenReturn(new HashMap<>());
+        
+        handler.insertLetterItem(letterRequest);
+        
+        verify(jobTxService, times(1)).finishRequest(any(), eq((short) 6), eq("NO_RECEIVER"), anyString());
+    }
+
+    @Test
+    void mapDtoToEntity_ShouldReturnLetterRequest() {
+        when(letterRequestConverter.doConvertToDto(any(), any())).thenReturn(letterRequest);
+        
+        LetterRequest result = handler.mapDtoToEntity(validDto, "test-user", "test-branch");
+        
+        assertNotNull(result);
+        assertEquals("test-user", result.getCreatedBy());
+        assertEquals("test-branch", result.getBranchId());
+    }
+
+    @Test
+    void preparedNotifyLogDto_ShouldReturnEmptyList_WhenNoLogs() {
+        when(letterNotificationLogService.getLetterNotificationLogRecords(anyString(), any()))
+            .thenReturn(new ArrayList<>());
+        
+        List<LetterNotifyLogDTO> result = handler.preparedNotifyLogDto(letterItem);
+        
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
+    }
+
+    // Additional edge case tests
+    @Test
+    void validate_ShouldThrowException_WhenFirstPaymentDateAfterLastPaymentDate() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setFirstPaymentDate("2023-01-02");
+        dto.setLastPaymentDate("2023-01-01");
+        dto.setRequestTypeId("1");
+        
+        Exception exception = assertThrows(IllegalArgumentException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "validate", dto));
+        
+        assertEquals("İlk ödeme tarihi son ödeme tarihinden büyük olamaz.", exception.getMessage());
+    }
+
+    @Test
+    void validate_ShouldThrowException_WhenLastPaymentDateBeforeFirstPaymentDate() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setFirstPaymentDate("2023-01-02");
+        dto.setLastPaymentDate("2023-01-01");
+        dto.setRequestTypeId("1");
+        
+        Exception exception = assertThrows(IllegalArgumentException.class, 
+            () -> ReflectionTestUtils.invokeMethod(handler, "validate", dto));
+        
+        assertEquals("sonOdemeTarih, ilkOdemeTarih'ten önce olamaz.", exception.getMessage());
+    }
+
+    @Test
+    void handleRequest_ShouldSendErrorEmail_WhenExceptionOccurs() throws Exception {
+        // Force an exception
+        when(letterRequestConverter.doConvertToDto(any(), any())).thenThrow(new RuntimeException("Test exception"));
+        
+        Exception exception = assertThrows(Exception.class, 
+            () -> handler.handleRequest(validDto, "test-user", "test-branch"));
+        
+        assertTrue(exception.getMessage().contains("Mektup gönderme işlemi için talep kaydetme işlemi sırasında bir hata meydana geldi"));
+    }
+}
+
+
+
+//son
+package tr.gov.tcmb.ogmdfif.service.handler;
+
 import com.itextpdf.text.PageSize;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
