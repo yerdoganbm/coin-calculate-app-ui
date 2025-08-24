@@ -1,3 +1,893 @@
+package tr.gov.tcmb.ogmdfif.service.handler;
+
+import com.itextpdf.text.PageSize;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.*;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.constant.*;
+import tr.gov.tcmb.ogmdfif.exception.ValidationException;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterItemDTO;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterNotifyLogDTO;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterRequestDto;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterRequestListePageDTO;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.repository.EftBilgisiYonetimArsivRepository;
+import tr.gov.tcmb.ogmdfif.repository.EftBilgisiYonetimRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+import tr.gov.tcmb.ogmdfif.repository.ProvizyonArsivIslemleriRepository;
+import tr.gov.tcmb.ogmdfif.service.*;
+import tr.gov.tcmb.ogmdfif.service.event.LetterRequestCreatedEvent;
+import tr.gov.tcmb.ogmdfif.service.impl.LetterJobTxService;
+import tr.gov.tcmb.ogmdfif.util.*;
+import tr.gov.tcmb.ogmdfif.ws.client.EFTClientService;
+import tr.gov.tcmb.submuhm.pikur.PikurDocument;
+import tr.gov.tcmb.submuhm.pikur.model.veri.DocGrupVeri;
+import tr.gov.tcmb.submuhm.pikur.model.veri.DocVeri;
+import tr.gov.tcmb.submuhm.pikur.service.PikurIslemService;
+
+
+import javax.print.attribute.standard.OrientationRequested;
+import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class OdemeMektupLetterHandler implements LetterHandler {
+
+    private final ProvizyonIslemleriService provizyonIslemleriService;
+    private final KararIslemleriService kararIslemleriService;
+    private final OrtakMektupIslemlerService ortakMektupIslemlerService;
+    private final EFTClientService eftClientService;
+    private final EftBilgisiYonetimArsivRepository eftBilgisiYonetimArsivRepository;
+    private final ProvizyonArsivIslemleriRepository provizyonArsivIslemleriRepository;
+    private final BorcBilgiService borcBilgiService;
+    private final PikurIslemService pikurIslemService;
+    private final BankaSubeService bankaSubeService;
+    private final EftBilgisiYonetimRepository eftBilgisiYonetimRepository;
+    private final LetterRequestRepository letterRequestRepo;
+    private final ApplicationEventPublisher eventPublisher;
+    private final LetterRequestConverterService letterRequestConverter;
+    private final LetterJobTxService jobTxService;
+    private final LetterItemConverterService letterItemConverter;
+    private final KullaniciBilgileriService kullaniciBilgileriService;
+    private final LetterRequestTransactionService letterRequestTransactionService;
+    private final LetterNotificationLogConverterService letterNotificationLogConverterService;
+    private final LetterNotificationLogService letterNotificationLogService;
+    private final MailFacade mailFacade;
+
+    @Qualifier("letterReqExecutor")
+    private final Executor letterReqExecutor;
+
+
+    @Value("${letterreq.per-task-timeout-ms:3000}")
+    private long perTaskTimeoutMs;
+
+    @Value("${letterreq.global-timeout-ms:10000}")
+    private long globalTimeoutMs;
+
+
+    private static final String ihracatciNakitOdemeMektubuPikurXMLPath = "print/IHRACATCINAKITODEMEMEKTUP.xml";
+
+
+    private void nakitKontrolYap(String kararNo) throws ValidationException {
+        Karar karar = kararIslemleriService.getKararByKararNoAndSube(kararNo, SubeKoduEnum.IDARE_MERKEZI.getSubeId());
+
+        if (karar == null) {
+            throw new ValidationException("Aradığınız karar bulunamamıştır. Karar No: " + kararNo);
+        } else {
+            if (!karar.isNakitKarar()) {
+                throw new ValidationException("Ödeme mektupları sadece nakit ödemeler için üretilmektedir.");
+            }
+        }
+    }
+
+    @Override
+    public UUID handleRequest(LetterRequestDto dto, String createdBy, String branchId) throws Exception {
+        validate(dto);
+        try {
+            LetterRequest entity = mapDtoToEntity(dto, createdBy, branchId);
+            if (entity == null) {
+                throw new ValidationException("Mektup talep kaydı verisi hatalı!");
+            }
+            entity = letterRequestRepo.save(entity);
+
+            // Item oluşturma
+            insertLetterItem(entity);
+
+            // Event publish → asenkron mail için
+            eventPublisher.publishEvent(new LetterRequestCreatedEvent(entity.getId()));
+
+            return entity.getId();
+        } catch (Exception e) {
+            String message = String.format("Mektup gönderme işlemi için talep kaydetme işlemi sırasında bir hata meydana geldi:  %s", dto);
+            ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null, message, null, null, MailTypeEnum.HATA_BILDIRIMI);
+
+            throw new Exception(message, e);
+        }
+    }
+
+
+    private void validate(LetterRequestDto dto) {
+        if (dto.getFirstPaymentDate() == null || dto.getLastPaymentDate() == null) {
+            throw new IllegalArgumentException("İlk ve son ödeme tarihi zorunludur.");
+        }
+
+        LocalDate firstPaymentDate = LocalDate.parse(dto.getFirstPaymentDate());
+        LocalDate lastPaymentDate = LocalDate.parse(dto.getLastPaymentDate());
+
+        if (firstPaymentDate.isAfter(lastPaymentDate)) {
+            throw new IllegalArgumentException("İlk ödeme tarihi son ödeme tarihinden büyük olamaz.");
+        }
+
+        if (lastPaymentDate.isBefore(firstPaymentDate)) {
+            throw new IllegalArgumentException("sonOdemeTarih, ilkOdemeTarih'ten önce olamaz.");
+        }
+
+        long daysBetween = ChronoUnit.DAYS.between(firstPaymentDate, lastPaymentDate);
+
+        if (Math.abs(daysBetween) > 2) {
+            throw new IllegalArgumentException("Tarihler arasındaki fark en fazla 2 gün olabilir.");
+        }
+
+        if (dto.getRequestTypeId() == null) {
+            throw new IllegalArgumentException("mektupTip zorunludur.");
+        }
+        if (StringUtils.isNotBlank(dto.getVkn()) && StringUtils.isNotBlank(dto.getTckn())) {
+            throw new IllegalArgumentException("VKN ve TCKN aynı anda gönderilemez. Tekil işlemde birini gönderin.");
+        }
+    }
+
+
+    private LetterRequest mapDtoToEntity(LetterRequestDto dto, String createdBy, String branchId) {
+        return Stream.of(new LetterRequest())
+                .peek(entity -> {
+                    entity.setCreatedBy(createdBy);
+                    entity.setBranchId(branchId);
+                    letterRequestConverter.doConvertToDto(dto, entity);
+                })
+                .findFirst()
+                .orElse(null);
+    }
+
+    public void insertLetterItem(LetterRequest entity) throws Exception {
+
+        Map<String, String> receivers = handleLetterTransactions(entity);
+        if (receivers == null || receivers.isEmpty()) {
+            jobTxService.finishRequest(entity.getId(), (short) 6, "NO_RECEIVER", "Ödeme mektubu gönderilecek şartları sağlayan provizyon/ihracatçı buluanamadı!");
+            return;
+        }
+
+        //receivers.forEach((key, value) -> jobTxService.insertItemIfNotExists(UUID.randomUUID(), entity.getId(), key, value));
+        jobTxService.insertLetterItemsBatch(entity.getId(), receivers);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void letterRequestProcessingStart(LetterRequest request, LetterItem letterItem) throws Exception {
+        try {
+            if (StringUtils.isNotEmpty(request.getKararNoAdi())) {
+                this.nakitKontrolYap(request.getKararNoAdi());
+            }
+            String provizyonId = letterItem.getReceiverKey();
+            String letterReqId = request.getId().toString();
+
+            log.info("letterRequestProcessingStart" + Constants.STR_ODEME_MEKTUP + " gönderme işlemi başlamıştır.ProvizyonId : {}", provizyonId, "Mektup-TalepID : " + letterReqId);
+
+            if (DateUtils.odemeTarihiMilattanSonraMi(request)) {
+                mailAdresiOlanIhracatcilaraOdemeMektuplariGonder(request, letterItem);
+            } else {
+                mailAdresiOlanIhracatcilaraOdemeMektuplariGonderArsiv(request, letterItem);
+            }
+        } catch (Exception e) {
+            log.error("letterRequestProcessingStart-Ödeme mektup gönderim işlemi sırasında bir hata meydana geldi. {}", e.getMessage());
+
+            String exMessage = String.format("Yapmak istediğiniz -ödeme mektubu gönderme işlemi- sırasında bir hata meydana geldi: %s ," +
+                            "Talep Id: %s, Provizyon Id: %s",
+                    e.getMessage(), request.getId(), letterItem.getReceiverKey());
+
+            ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null, exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+        }
+    }
+
+    @Override
+    public Map<String, String> handleLetterTransactions(LetterRequest request) throws Exception {
+        log.info("handleOdemeMetupTransactions metodu çağrıldı. Request: {}", request);
+
+        List<String> subeIdList = provizyonIslemleriService.getSubeIdList();
+        Integer belgeNo = Objects.isNull(request.getBelgeNo()) ? null : Integer.valueOf(request.getBelgeNo());
+
+        log.info("Ödeme tarihi milattan sonra mı kontrol ediliyor.");
+        if (DateUtils.odemeTarihiMilattanSonraMi(request)) {
+            log.info("Ödeme tarihi milattan sonra. Provizyon listesi çekiliyor.");
+            List<Provizyon> provizyonList = provizyonIslemleriService.listProvizyon(request.getFirstPaymentDate(),
+                    request.getLastPaymentDate(), KararTipiEnum.getByAdi(request.getTahakkukTuru()), belgeNo,
+                    request.getYil(), request.getKararNoAdi(), request.getFirmaVkn(), request.getUreticiTckn(),
+                    null, null, subeIdList);
+
+            final int expected = provizyonList.size();
+            final int capacity = (int) (expected * 1.34) + 1;
+            Map<String, String> map = new HashMap<>(capacity);
+
+            log.info("Provizyon listesi çekildi. Liste boyutu: {}", provizyonList.size());
+
+
+            for (Provizyon provizyon : provizyonList) {
+                Ihracatci ihr = provizyon.getIhracatci();
+                String value = (ihr != null) ? ihr.getTcknVknAsString() : null;
+                String key = String.valueOf(provizyon.getId());
+                map.putIfAbsent(key, value);
+            }
+
+            return map;
+
+        } else {
+            log.info("Ödeme tarihi milattan önce veya eşit. Provizyon arşiv listesi çekiliyor.");
+            List<ProvizyonArsiv> provizyonArsivList = provizyonIslemleriService.listProvizyonArsiv(request.getFirstPaymentDate(),
+                    request.getLastPaymentDate(), KararTipiEnum.getByAdi(request.getTahakkukTuru()), belgeNo, request.getYil(), request.getKararNoAdi(),
+                    request.getFirmaVkn(), request.getUreticiTckn(), null, null, subeIdList);
+
+            log.info("Provizyon arşiv listesi çekildi. Liste boyutu: {}", provizyonArsivList.size());
+
+            final int expectedArs = provizyonArsivList.size();
+            final int capacityArs = (int) (expectedArs * 1.34) + 1;
+            Map<String, String> arsivMap = new HashMap<>(capacityArs);
+
+            for (ProvizyonArsiv provizyonArsiv : provizyonArsivList) {
+                Ihracatci ihr = provizyonArsiv.getIhracatci();
+                String value = (ihr != null) ? ihr.getTcknVknAsString() : null;
+                String key = String.valueOf(provizyonArsiv.getId());
+                arsivMap.putIfAbsent(key, value);
+            }
+
+            return arsivMap;
+        }
+
+    }
+
+    public void mailAdresiOlanIhracatcilaraOdemeMektuplariGonder(LetterRequest request, LetterItem letterItem) throws Exception {
+        log.info("odeme mektuplarini eposta ile gonder-E-mail adres bilgisi olan ihracatçılara mail ile mektup gönderme işlemi başladı");
+
+        String provizyonId = letterItem.getReceiverKey();
+        Provizyon provizyon = provizyonIslemleriService.getProvizyonById(new BigDecimal(provizyonId));
+
+        if (Objects.isNull(provizyon)) {
+            String exMessage = String.format("Yapmak istediğiniz -ödeme mektubu gönderme işlemi- için ödeme mektubu bulunamamıştır. TalepId : %s", request.getId());
+            ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null,  exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+            return;
+        }
+
+        Map<Long, List<BorcBilgi>> borcMap = this.borcVerileriniTopluAl(List.of(provizyon));
+        if (borcMap == null || borcMap.isEmpty()) {
+
+            String exMessage = String.format("Ödeme mektubu gönderme işlemi sırasında provizyon borç bilgisi bulunamadı." +
+                    "Provizyon ID: %s, Talep ID: %s. Lütfen provizyon bilgilerini kontrol edin veya destek ekibiyle iletişime geçin.", provizyon.getId(), request.getId());
+            ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null,  exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+            return;
+        }
+        try {
+            islemYapOdemeMektuplari(provizyon, borcMap.get(provizyon.getId()), request, letterItem);
+        } catch (Exception e) {
+            String exMessage = String.format("Yapmak istediğiniz -ödeme mektubu gönderme işlemi- sırasında bir hata meydana geldi: --->  %s hatadetay: %s : provizyonId : %s", e, e.getMessage(), provizyon.getId());
+
+            log.error("mailAdresiOlanIhracatcilaraOdemeMektuplariGonder{}", exMessage, e);
+            try {
+                ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null,  exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+            } catch (ValidationException ex) {
+                log.error("mailAdresiOlanIhracatcilaraOdemeMektuplariGonder" + "Hatayı eposta ile gönderme işlemi sırasında bir hata meydana geldi : {}", ex.getMessage());
+                throw new ValidationException(exMessage);
+            }
+        }
+
+        log.info("odeme mektuplarini eposta ile gonder-Kep bilgisi olan ihracatçılara mail ile mektup gönderme işlemi bitti");
+
+
+    }
+
+    public void mailAdresiOlanIhracatcilaraOdemeMektuplariGonderArsiv(LetterRequest request, LetterItem letterItem) throws Exception {
+        log.info("odeme mektuplarini eposta ile gonder-Mail adresi bilgisi olan ihracatçılara mail ile mektup gönderme işlemi başladı");
+
+
+        String provizyonArsivId = letterItem.getReceiverKey();
+        ProvizyonArsiv provizyonArsiv = provizyonArsivIslemleriRepository.getProvizyonArsiv(Long.valueOf(provizyonArsivId));
+
+        if (Objects.isNull(provizyonArsiv)) {
+
+            String exMessage = String.format("Yapmak istediğiniz -ödeme mektubu gönderme işlemi- için ödeme mektubu bulunamamıştır. TalepId : %s", request.getId());
+            ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null,  exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+            return;
+        }
+
+        Map<Long, List<BorcBilgiArsiv>> borcArsivMap = this.borcVerileriniTopluAlArsiv(List.of(provizyonArsiv));
+        if (borcArsivMap == null || borcArsivMap.isEmpty()) {
+            String exMessage = String.format("Ödeme mektubu gönderme işlemi sırasında provizyon borç bilgisi bulunamadı." +
+                    "Provizyon ID: %s, Talep ID: %s. Lütfen provizyon bilgilerini kontrol edin veya destek ekibiyle iletişime geçin.", provizyonArsiv.getId(), request.getId());
+            ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null,  exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+            return;
+        }
+
+
+        try {
+            islemYapOdemeMektuplariArsiv(provizyonArsiv, borcArsivMap.get(provizyonArsiv.getId()), request, letterItem);
+        } catch (Exception e) {
+            String exMessage = String.format("Yapmak istediğiniz -ödeme mektubu gönderme işlemi- sırasında bir hata meydana geldi: %s : provizyonId : %s", e.getMessage(), provizyonArsiv.getId());
+            log.error("mailAdresiOlanIhracatcilaraOdemeMektuplariGonder.{}", exMessage);
+            try {
+
+                ortakMektupIslemlerService.sendDesicionLetterEmail(null, null, null,  exMessage, request, letterItem,MailTypeEnum.HATA_BILDIRIMI);
+
+            } catch (ValidationException ex) {
+                log.error("mailAdresiOlanIhracatcilaraOdemeMektuplariGonderArsiv-Hatayı eposta ile gönderme işlemi sırasında bir hata meydana geldi : {}", ex.getMessage());
+            }
+        }
+        log.info("odeme mektuplarini eposta ile gonder - Kep bilgisi olan ihracatçılara mail ile mektup gönderme işlemi bitti");
+    }
+
+    private Map<Long, List<BorcBilgi>> borcVerileriniTopluAl(List<Provizyon> provizyonList) {
+        List<Long> provizyonIds = provizyonList.stream()
+                //.filter(provizyon -> provizyon.getIhracatci().getEmail() != null)
+                .map(Provizyon::getId)
+                .collect(Collectors.toList());
+        return borcBilgiService.getBorcBilgiByProvizyonIdListWithoutIslemDurum(provizyonIds)
+                .stream()
+                .collect(Collectors.groupingBy(borcBilgi -> borcBilgi.getProvizyon().getId()));
+    }
+
+    private Map<Long, List<BorcBilgiArsiv>> borcVerileriniTopluAlArsiv(List<ProvizyonArsiv> provizyonArsivList) {
+        List<Long> provizyonArsivIds = provizyonArsivList.stream()
+                .map(ProvizyonArsiv::getId)
+                .collect(Collectors.toList());
+        return borcBilgiService.getBorcBilgiByProvizyonArsivIdListWithoutIslemDurum(provizyonArsivIds)
+                .stream()
+                .collect(Collectors.groupingBy(borcBilgiArsiv -> borcBilgiArsiv.getProvizyonArsiv().getId()));
+    }
+
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void islemYapOdemeMektuplariArsiv(ProvizyonArsiv provizyonArsiv, List<BorcBilgiArsiv> borcBilgiArsivs, LetterRequest request,LetterItem letterItem) throws Exception {
+        log.info("islemYapOdemeMektuplariArsiv- Odeme Mektuplari işlenmektedir.{}", provizyonArsiv.getId());
+
+
+        if (!isValidProvizyonArsivAndBorcBilgiArsiv(provizyonArsiv, borcBilgiArsivs)){
+            String exMessage = "Ödeme mektubu gönderme işlemi için gerekli ihracatçı bilgileri eksiktir. İhracatçı e-postası veya borç bilgileri bulunamadı";
+            throw new ValidationException(exMessage);        }
+
+        List<DocGrupVeri> provizyonVeri = getOdemeMektupDetayByProvizyon(provizyonArsiv);
+        if (CollectionUtils.isEmpty(provizyonVeri)) {
+            String exMessage = String.format("Ödeme mektubu gönderme işlemi için gerekli provizyon bilgileri eksiktir. Provizyon ID: %s, Talep ID: %s", provizyonArsiv.getId(), request.getId());
+            throw new ValidationException(exMessage);
+        }
+
+        List<DocGrupVeri> veriler = new ArrayList<>(provizyonVeri);
+        DocVeri docVeri = new DocVeri();
+        docVeri.addGrupVeriAll(veriler);
+        PikurDocument pd = pikurIslemService.xmlYukle(ihracatciNakitOdemeMektubuPikurXMLPath);
+        ByteArrayOutputStream baos = pikurIslemService.pdfDocOlustur(pd, docVeri, PageSize.A4, OrientationRequested.PORTRAIT);
+        ExportedFile file = outputAsPDF(baos, this.handleExportFileName(request.getFirstPaymentDate(), request.getLastPaymentDate(), MektupTipEnum.ODEME_MEKTUPLARI));
+
+        ortakMektupIslemlerService.sendDesicionLetterEmail(null, provizyonArsiv, file,  null, request, letterItem,MailTypeEnum.STANDART);
+        log.info("islemYapOdemeMektuplariArsiv-Odeme Mektuplari işlenmiştir.{}", provizyonArsiv.getId());
+    }
+
+
+    public String handleExportFileName(LocalDate ilkOdemeTarihi, LocalDate sonOdemeTarihi, MektupTipEnum mektupTip) {
+        Date odemeTarihi = Date.from(ilkOdemeTarihi.atStartOfDay(ZoneId.systemDefault()).toInstant());
+        Date odemeTarihiSon = Date.from(sonOdemeTarihi.atStartOfDay(ZoneId.systemDefault()).toInstant());
+
+        SimpleDateFormat sdfTarih = new SimpleDateFormat("dd/MM/yyyy");
+        String odemeTarihStr = sdfTarih.format(odemeTarihi);
+        String odemeTarihSonStr = sdfTarih.format(odemeTarihiSon);
+
+        return odemeTarihStr + "_" + odemeTarihSonStr + "_" + mektupTip.getAdi();
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void islemYapOdemeMektuplari(Provizyon provizyon, List<BorcBilgi> borcBilgis, LetterRequest request, LetterItem letterItem) throws Exception {
+        log.info("islemYapOdemeMektuplari Odeme Mektuplari işlenmektedir.{}", provizyon.getId());
+
+        if (!isValidProvizyonAndBorcBilgi(provizyon, borcBilgis)) {
+            String exMessage = "Ödeme mektubu gönderme işlemi için gerekli ihracatçı bilgileri eksiktir. İhracatçı e-postası veya borç bilgileri bulunamadı";
+            throw new ValidationException(exMessage);
+        }
+
+        List<DocGrupVeri> provizyonVeri = getOdemeMektupDetayByProvizyon(provizyon);
+        if (CollectionUtils.isEmpty(provizyonVeri)) {
+            String exMessage = String.format("Ödeme mektubu gönderme işlemi için gerekli provizyon bilgileri eksiktir. Provizyon ID: %s, Talep ID: %s", provizyon.getId(), request.getId());
+            throw new ValidationException(exMessage);
+        }
+        List<DocGrupVeri> veriler = new ArrayList<>(provizyonVeri);
+        DocVeri docVeri = new DocVeri();
+        docVeri.addGrupVeriAll(veriler);
+        PikurDocument pd = pikurIslemService.xmlYukle(ihracatciNakitOdemeMektubuPikurXMLPath);
+        ByteArrayOutputStream baos = pikurIslemService.pdfDocOlustur(pd, docVeri, PageSize.A4, OrientationRequested.PORTRAIT);
+        ExportedFile file = outputAsPDF(baos, this.handleExportFileName(request.getFirstPaymentDate(), request.getLastPaymentDate(), MektupTipEnum.ODEME_MEKTUPLARI));
+
+        ortakMektupIslemlerService.sendDesicionLetterEmail(provizyon, null, file,  null, request, letterItem,MailTypeEnum.STANDART);
+
+        log.info("islemYapOdemeMektuplari-Odeme Mektuplari işlenmiştir.{}", provizyon.getId());
+
+    }
+
+    private boolean isValidProvizyonAndBorcBilgi(Provizyon provizyon, List<BorcBilgi> borcBilgis) {
+        return provizyon != null &&
+                provizyon.getIhracatci() != null &&
+                StringUtils.isNotEmpty(provizyon.getIhracatci().getEmail()) &&
+                CollectionUtils.isNotEmpty(borcBilgis);
+    }
+
+    private boolean isValidProvizyonArsivAndBorcBilgiArsiv(ProvizyonArsiv provizyonArsiv, List<BorcBilgiArsiv> borcBilgiArsivs) {
+        return provizyonArsiv != null &&
+                provizyonArsiv.getIhracatci() != null &&
+                StringUtils.isNotEmpty(provizyonArsiv.getIhracatci().getEmail()) &&
+                CollectionUtils.isNotEmpty(borcBilgiArsivs);
+    }
+
+    public ExportedFile outputAsPDF(ByteArrayOutputStream baos, String dosyaAdi) {
+        log.info("outputAsPDF-PDF olarak çıkarma işlemi başladı.");
+        ExportedFile file = new ExportedFile();
+        byte[] byteArray = baos.toByteArray();
+        file.setData(byteArray);
+        file.setFileName(dosyaAdi);
+        file.setMimeType(ExportedFile.Types.Pdf.mimeType);
+        return file;
+    }
+
+    public List<DocGrupVeri> getOdemeMektupDetayByProvizyon(Provizyon provizyon) {
+        SimpleDateFormat sdfTarih = new SimpleDateFormat("dd/MM/yyyy");
+        List<DocGrupVeri> veriler = new ArrayList<>();
+        List<DocGrupVeri> borclar = getOdemeMektupBorcBilgileri(provizyon, false);
+        if (CollectionUtils.isEmpty(borclar)) {
+            return new ArrayList<>();
+        }
+        DocGrupVeri detayGrup = new DocGrupVeri();
+        detayGrup.setGrupAd("DETAY");
+        Ihracatci ihracatci = provizyon.getIhracatci();
+        detayGrup.addAlanVeri("IHRACATCIADI", ihracatci.getAd());
+        String adres1 = ihracatci.getAdres().trim();
+        String adres2 = StringUtils.EMPTY;
+        String adres3 = StringUtils.EMPTY;
+        if (adres1.length() > 50) {
+            if (adres1.length() > 100) {
+                adres3 = adres1.substring(100);
+                adres2 = adres1.substring(50, 100);
+            } else {
+                adres2 = adres1.substring(50);
+                adres1 = adres1.substring(0, 50);
+            }
+        }
+
+        detayGrup.addAlanVeri("IHRACATCIADRES1", adres1);
+        detayGrup.addAlanVeri("IHRACATCIADRES2", adres2);
+        detayGrup.addAlanVeri("IHRACATCIADRES3", adres3);
+        detayGrup.addAlanVeri("TARIH", sdfTarih.format(new Date()));
+        detayGrup.addAlanVeri("KARARNO", provizyon.getKarar().getKararNo());
+        String kararAraMetin = "sayılı %s ";
+        detayGrup.addAlanVeri("KARARADI", String.format(kararAraMetin, provizyon.getKarar().getAd()));
+        detayGrup.addAlanVeri("PROVIZYONTUTAR", provizyon.getTutar());
+        detayGrup.addAlanVeri("ODEMETARIH", sdfTarih.format(provizyon.getOdemeTarih()));
+
+        SubeKoduEnum subeKoduEnum = SubeKoduEnum.getById(provizyon.getKarar().getSubeId());
+        if (SubeKoduEnum.ANKARA.equals(subeKoduEnum) && !KararTipiEnum.TARIMSAL.equals(KararTipiEnum.getBykod(provizyon.getKarar().getTip()))) {
+            subeKoduEnum = SubeKoduEnum.IDARE_MERKEZI;
+        }
+        detayGrup.addAlanVeri("TCMBSUBEADI", subeKoduEnum != null ? subeKoduEnum.getAdi() : null);
+
+        veriler.add(detayGrup);
+        veriler.addAll(borclar);
+        return veriler;
+    }
+
+    public List<DocGrupVeri> getOdemeMektupDetayByProvizyon(ProvizyonArsiv provizyonArsiv) {
+        SimpleDateFormat sdfTarih = new SimpleDateFormat("dd/MM/yyyy");
+        List<DocGrupVeri> veriler = new ArrayList<>();
+        List<DocGrupVeri> borclar = getOdemeMektupBorcBilgileri(provizyonArsiv, false);
+        if (CollectionUtils.isEmpty(borclar)) {
+            return new ArrayList<>();
+        }
+        DocGrupVeri detayGrup = new DocGrupVeri();
+        detayGrup.setGrupAd("DETAY");
+        Ihracatci ihracatci = provizyonArsiv.getIhracatci();
+        detayGrup.addAlanVeri("IHRACATCIADI", ihracatci.getAd());
+        String adres1 = ihracatci.getAdres().trim();
+        String adres2 = StringUtils.EMPTY;
+        String adres3 = StringUtils.EMPTY;
+        if (adres1.length() > 50) {
+            if (adres1.length() > 100) {
+                adres3 = adres1.substring(100);
+                adres2 = adres1.substring(50, 100);
+            } else {
+                adres2 = adres1.substring(50);
+                adres1 = adres1.substring(0, 50);
+            }
+        }
+
+        detayGrup.addAlanVeri("IHRACATCIADRES1", adres1);
+        detayGrup.addAlanVeri("IHRACATCIADRES2", adres2);
+        detayGrup.addAlanVeri("IHRACATCIADRES3", adres3);
+        detayGrup.addAlanVeri("TARIH", sdfTarih.format(new Date()));
+        detayGrup.addAlanVeri("KARARNO", provizyonArsiv.getKarar().getKararNo());
+        String kararAraMetin = "sayılı %s ";
+        detayGrup.addAlanVeri("KARARADI", String.format(kararAraMetin, provizyonArsiv.getKarar().getAd()));
+        detayGrup.addAlanVeri("PROVIZYONTUTAR", getProvizyonArsivToplamTutar(provizyonArsiv, false));
+        detayGrup.addAlanVeri("ODEMETARIH", sdfTarih.format(provizyonArsiv.getOdemeTarih()));
+        SubeKoduEnum subeKoduEnum = SubeKoduEnum.getById(provizyonArsiv.getKarar().getSubeId());
+        if (SubeKoduEnum.ANKARA.equals(subeKoduEnum) && !KararTipiEnum.TARIMSAL.equals(KararTipiEnum.getBykod(provizyonArsiv.getKarar().getTip()))) {
+            subeKoduEnum = SubeKoduEnum.IDARE_MERKEZI;
+        }
+        detayGrup.addAlanVeri("TCMBSUBEADI", subeKoduEnum != null ? subeKoduEnum.getAdi() : null);
+        veriler.add(detayGrup);
+        veriler.addAll(borclar);
+        return veriler;
+    }
+
+    public BigDecimal getProvizyonArsivToplamTutar(ProvizyonArsiv provizyon, boolean sadeceBorcYazdir) {
+        BigDecimal toplamTutar = BigDecimal.ZERO;
+        Long provizyonId = provizyon.getId();
+        if (provizyonId == null) {
+            return toplamTutar;
+        }
+        List<EftBilgiYonetimArsiv> eftBilgiYonetimList = eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(provizyonId);
+        Map<BigDecimal, EftBilgiYonetimArsiv> eftBilgiYonetimMap = new HashMap<>();
+        for (EftBilgiYonetimArsiv eftBilgiYonetim : eftBilgiYonetimList) {
+            eftBilgiYonetimMap.put(new BigDecimal(String.valueOf(eftBilgiYonetim.getBorcBilgiArsiv().getId())), eftBilgiYonetim);
+        }
+        List<Long> borcIdList = eftBilgiYonetimList.stream().map(EftBilgiYonetimArsiv::getBorcBilgiArsiv).map(BorcBilgiArsiv::getId).sorted().collect(Collectors.toList());
+        List<BorcBilgiArsiv> borcBilgiList = borcBilgiService.getBorcBilgiArsivList(provizyon);
+        for (Long currentBorcId : borcIdList) {
+            BigDecimal borcId = BigDecimal.valueOf(currentBorcId);
+            if (sadeceBorcYazdir && borcBilgiList.stream().noneMatch(borcBilgi -> new BigDecimal(borcBilgi.getId()).equals(borcId))) {
+                continue;
+            }
+            EftBilgiYonetimArsiv eftBilgiYonetim = eftBilgiYonetimMap.get(borcId);
+            if (eftBilgiYonetim.getKasTarih() == null) {
+                continue;
+            }
+            toplamTutar = toplamTutar.add(eftBilgiYonetim.getTutar());
+        }
+        return toplamTutar;
+    }
+
+
+    public List<DocGrupVeri> getOdemeMektupBorcBilgileri(Provizyon provizyon, Boolean sadeceBorcYazdir) {
+
+        List<EftBilgiYonetim> eftBilgiYonetimList = eftBilgisiYonetimRepository.getEftBilgiYonetimsByProvizyonId(provizyon.getId());
+        if (eftBilgiYonetimList == null || eftBilgiYonetimList.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return eftBilgiYonetimList.stream()
+                .filter(eftBilgiYonetim -> eftBilgiYonetim.getKasTarih() != null && !sadeceBorcYazdir)
+                .map(eftBilgiYonetim -> {
+                    try {
+                        return this.odemeMektupDetayBorcHazirla(eftBilgiYonetim);
+                    } catch (Exception e) {
+                        log.error("OdemeMektupDetayBorcHazirla hatası: " + e.getMessage()); // Hata mesajını logla
+                        return null; // veya uygun bir hata değeri döndür
+                    }
+                }).filter(Objects::nonNull)
+                .collect(Collectors.toUnmodifiableList());
+    }
+
+    private DocGrupVeri odemeMektupDetayBorcHazirla(EftBilgiYonetim eftBilgiYonetim) throws Exception {
+
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+        LocalDate localDate = LocalDate.parse(eftBilgiYonetim.getKasTarih(), formatter);
+        //MusteriHesabaOdeme eftMesaj = (MusteriHesabaOdeme) eftClientService.getGunlukKasMesajBySorguNoAndOdemeTarihi(eftBilgiYonetim.getKasSorguNo(), localDate);
+
+        DocGrupVeri detayBorclar = new DocGrupVeri();
+        detayBorclar.setGrupAd("BORCBILGILERI");
+
+        /*if (eftBilgiYonetim.getBorcBilgi() != null && BorcTipEnum.SGK.getKod().equals(eftBilgiYonetim.getBorcBilgi().getBorcTipi())) {
+            BorcBilgi borcBilgi = eftBilgiYonetim.getBorcBilgi();
+            detayBorclar.addAlanVeri("BORCALICISI", borcBilgi.getAliciAdi());
+            detayBorclar.addAlanVeri("BORCTUTARI", borcBilgi.getTutar());
+
+        } else {
+            detayBorclar.addAlanVeri("BORCALICISI", eftMesaj.getAlAd());
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(StringUtil.formatVirgulToNokta(eftMesaj.getTtr())));
+        }*/
+
+        //todo
+        if (eftBilgiYonetim.getBorcBilgi() != null && BorcTipEnum.SGK.getKod().equals(eftBilgiYonetim.getBorcBilgi().getBorcTipi())) {
+            BorcBilgi borcBilgi = eftBilgiYonetim.getBorcBilgi();
+            detayBorclar.addAlanVeri("BORCALICISI", borcBilgi.getAliciAdi());
+            detayBorclar.addAlanVeri("BORCTUTARI", borcBilgi.getTutar());
+
+        } else {
+            detayBorclar.addAlanVeri("BORCALICISI", "test");
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(1));
+        }
+
+        /*String eftBankaKoduAdi = eftMesaj.getAlKK() + "-"
+                + bankaSubeService.getBankaForBankaKodu(eftMesaj.getAlKK()).getAd();*/
+
+        //todo
+        String eftBankaKoduAdi = "test";
+
+
+
+        StringBuilder sb = new StringBuilder(eftBankaKoduAdi.trim());
+        if (sb.length() > 30) {
+            sb.setLength(30);
+        }
+        /*detayBorclar.addAlanVeri("EFTBANKAKODUADI", sb.toString());
+        detayBorclar.addAlanVeri("EFTHESAP", eftMesaj.getAlHesN());
+        detayBorclar.addAlanVeri("EFTTARIHI", eftMesaj.getTrh());
+        detayBorclar.addAlanVeri("EFTSORGUNO", eftMesaj.getSN());
+        detayBorclar.addAlanVeri("EFTACIKLAMA", eftMesaj.getAcklm());*/
+
+        detayBorclar.addAlanVeri("EFTBANKAKODUADI", sb.toString());
+        detayBorclar.addAlanVeri("EFTHESAP", "test");
+        detayBorclar.addAlanVeri("EFTTARIHI", "test");
+        detayBorclar.addAlanVeri("EFTSORGUNO", "test");
+        detayBorclar.addAlanVeri("EFTACIKLAMA", "test");
+
+
+        return detayBorclar;
+    }
+
+    public List<DocGrupVeri> getOdemeMektupBorcBilgileri(ProvizyonArsiv provizyon, Boolean sadeceBorcYazdir) {
+
+        List<EftBilgiYonetimArsiv> eftBilgiYonetimList = eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(provizyon.getId());
+        if (eftBilgiYonetimList == null || eftBilgiYonetimList.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return eftBilgiYonetimList.stream()
+                .filter(eftBilgiYonetim -> eftBilgiYonetim.getKasTarih() != null && !sadeceBorcYazdir)
+                .map(eftBilgiYonetim -> {
+                    try {
+                        return this.odemeMektupDetayBorcHazirlaArsiv(eftBilgiYonetim);
+                    } catch (Exception e) {
+                        System.err.println("OdemeMektupDetayBorcHazirla-arsiv hatası: " + e.getMessage()); // Hata mesajını logla
+                        return null; // veya uygun bir hata değeri döndür
+                    }
+                }).filter(Objects::nonNull)
+                .collect(Collectors.toUnmodifiableList());
+    }
+
+    private DocGrupVeri odemeMektupDetayBorcHazirlaArsiv(EftBilgiYonetimArsiv eftBilgiYonetimArsiv) throws Exception {
+
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+        LocalDate localDate = LocalDate.parse(eftBilgiYonetimArsiv.getKasTarih(), formatter);
+        //MusteriHesabaOdeme eftMesaj = (MusteriHesabaOdeme) eftClientService.getGunlukKasMesajBySorguNoAndOdemeTarihi(eftBilgiYonetimArsiv.getKasSorguNo(), localDate);
+
+        DocGrupVeri detayBorclar = new DocGrupVeri();
+        detayBorclar.setGrupAd("BORCBILGILERI");
+
+        /*if (eftBilgiYonetimArsiv.getBorcBilgiArsiv() != null && BorcTipEnum.SGK.getKod().equals(eftBilgiYonetimArsiv.getBorcBilgiArsiv().getBorcTipi())) {
+            BorcBilgiArsiv borcBilgiArsiv = eftBilgiYonetimArsiv.getBorcBilgiArsiv();
+            detayBorclar.addAlanVeri("BORCALICISI", borcBilgiArsiv.getAliciAdi());
+            detayBorclar.addAlanVeri("BORCTUTARI", borcBilgiArsiv.getTutar());
+        } else {
+            detayBorclar.addAlanVeri("BORCALICISI", eftMesaj.getAlAd());
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(StringUtil.formatVirgulToNokta(eftMesaj.getTtr())));
+        }*/
+
+
+            detayBorclar.addAlanVeri("BORCALICISI", "test");
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(1));
+
+
+        /*String eftBankaKoduAdi = eftMesaj.getAlKK() + "-"
+                + bankaSubeService.getBankaForBankaKodu(eftMesaj.getAlKK()).getAd();*/
+        String eftBankaKoduAdi = "test";
+
+        StringBuilder sb = new StringBuilder(eftBankaKoduAdi.trim());
+        if (sb.length() > 30) {
+            sb.setLength(30);
+        }
+        /*detayBorclar.addAlanVeri("EFTBANKAKODUADI", sb.toString());
+        detayBorclar.addAlanVeri("EFTHESAP", eftMesaj.getAlHesN());
+        detayBorclar.addAlanVeri("EFTTARIHI", eftMesaj.getTrh());
+        detayBorclar.addAlanVeri("EFTSORGUNO", eftMesaj.getSN());
+        detayBorclar.addAlanVeri("EFTACIKLAMA", eftMesaj.getAcklm());*/
+
+        detayBorclar.addAlanVeri("EFTBANKAKODUADI", "test");
+        detayBorclar.addAlanVeri("EFTHESAP", "test");
+        detayBorclar.addAlanVeri("EFTTARIHI", "test");
+        detayBorclar.addAlanVeri("EFTSORGUNO", "test");
+        detayBorclar.addAlanVeri("EFTACIKLAMA", "test");
+
+        return detayBorclar;
+    }
+
+
+    @Override
+    public UUID handleInitialLetterRequestTransaction(KararTipiEnum belgeTip,
+                                                      Integer belgeNo,
+                                                      Integer belgeYil,
+                                                      String kararNo,
+                                                      LocalDate ilkOdemeTarih,
+                                                      LocalDate sonOdemeTarih,
+                                                      String vkn,
+                                                      String tckn,
+                                                      MektupTipEnum mektupTip) throws Exception {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setRequestTypeId(String.valueOf(MektupTipEnum.convertMektupTipToRequestTypeId(mektupTip)));
+        dto.setFirstPaymentDate(String.valueOf(ilkOdemeTarih));
+        dto.setLastPaymentDate(String.valueOf(sonOdemeTarih));
+        dto.setTahakkukTuru(belgeTip != null ? belgeTip.name() : null);
+        dto.setBelgeNo(belgeNo != null ? belgeNo.toString() : null);
+        dto.setYil(belgeYil != null ? belgeYil.toString() : null);
+        dto.setKararNoAdi(kararNo);
+        dto.setVkn(vkn);
+        dto.setTckn(tckn);
+        dto.setScopeValue(vkn != null ? vkn : tckn);
+
+        String userSicil = SAMUtils.getSimdikiKullaniciSicili();
+        String subeId = kullaniciBilgileriService.getKullaniciSubeId();
+
+        // Request kaydetme
+        return handleRequest(dto, userSicil, subeId);
+    }
+
+
+    @Override
+    public LetterRequestListePageDTO handleGetLetterRequestDtoTransaction(
+            int activePage, int pageSize, KararTipiEnum belgeTip,
+            Integer belgeNo,
+            Integer belgeYil,
+            String kararNo,
+            LocalDate ilkOdemeTarih,
+            LocalDate sonOdemeTarih,
+            String vkn,
+            String tckn,
+            MektupTipEnum mektupTip) throws Exception {
+
+        log.debug("handleGetLetterRequestDtoTransaction called: belgeTip={}, belgeNo={}, belgeYil={}, kararNo={}, ilkOdemeTarih={}, sonOdemeTarih={}, vkn={}, tckn={}, mektupTip={}",
+                belgeTip, belgeNo, belgeYil, kararNo, ilkOdemeTarih, sonOdemeTarih, vkn, tckn, mektupTip);
+
+        // --- 0) Veriyi çek
+        final List<LetterRequest> all =
+                letterRequestTransactionService.listLetterRequest(ilkOdemeTarih, sonOdemeTarih,
+                        belgeTip, belgeNo, belgeYil, kararNo, vkn, tckn, mektupTip);
+
+        if (all == null || all.isEmpty()) {
+            log.warn("letterRequestList is empty or null. Returning empty list.");
+            return new LetterRequestListePageDTO(new ArrayList<>(), 0, 1, Sort.unsorted());
+        }
+
+
+        final int totalSize = all.size();
+        final int totalPage = (int) Math.ceil(totalSize / (double) Math.max(pageSize, 1));
+        if (activePage < 1 || activePage > totalPage) activePage = 1;
+
+        final int start = (activePage - 1) * pageSize;
+        final int end = Math.min(start + pageSize, totalSize);
+        final List<LetterRequest> page = all.subList(start, end);
+
+        List<UUID> pageIds = page.stream()
+                .map(LetterRequest::getId)
+                .collect(Collectors.toList());
+
+        Map<UUID, List<LetterItem>> itemsByRequestId =
+                letterRequestTransactionService.loadItemByLetterRequestIds(pageIds);
+
+        // --- 2) Paralel dönüşüm: daha güvenli CF kullanımı
+        final Duration perTaskTimeout = Duration.ofMillis(perTaskTimeoutMs);
+        final Duration globalTimeout = Duration.ofMillis(globalTimeoutMs);
+
+        List<CompletableFuture<LetterRequestDto>> futures = page.stream()
+                .map(lr -> CompletableFuture.supplyAsync(() -> {
+                            // DTO kurulum
+                            log.debug("Mapping LetterRequest to LetterRequestDto. LetterRequest ID: {}", lr.getId());
+
+                            LetterRequestDto dto = new LetterRequestDto();
+                            dto.setRequestTypeId(MektupTipEnum.convertRequestTypeIdToMektupTip(lr.getRequestTypeId()).getAdi());
+                            dto.setTalepDurum(Optional.ofNullable(LetterStatusEnum.getByKod(String.valueOf(lr.getStatusId())))
+                                    .map(LetterStatusEnum::getAdi)
+                                    .orElse(null));
+
+                            try {
+                                letterRequestConverter.doConvertToEntity(lr, dto);
+                            } catch (ParseException e) {
+                                log.error("Mektup isteği dönüştürme hatası (id={}): {}", lr.getId(), e.getMessage(), e);
+                                throw new RuntimeException("Failed to convert letterRequestDTO to entity", e);
+                            }
+
+                            // Item'lar
+                            log.debug("Getting LetterItems for LetterRequest ID: {}", lr.getId());
+                            List<LetterItemDTO> itemDtos = itemsByRequestId
+                                    .getOrDefault(lr.getId(), List.of())
+                                    .stream()
+                                    .map(li -> {
+                                        log.debug("Mapping LetterItem to LetterItemDTO. LetterItem ID: {}", li.getId());
+                                        LetterItemDTO lidto = new LetterItemDTO();
+                                        lidto.setStatus(Optional.ofNullable(LetterStatusEnum.getByKod(String.valueOf(li.getStatusId())))
+                                                .map(LetterStatusEnum::getAdi)
+                                                .orElse(null));
+                                        letterItemConverter.doConvertToDto(lidto, li);
+                                        lidto.setNotifyLogs(this.preparedNotifyLogDto(li));
+                                        return lidto;
+                                    })
+                                    .collect(Collectors.toList());
+
+                            dto.setItemDTOList(itemDtos);
+                            return dto;
+
+                        }, letterReqExecutor)
+                        // her iş için per-task timeout
+                        .orTimeout(perTaskTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                        // task özelinde hata yeme: null dön, kısmi başarıya izin ver
+                        .exceptionally(ex -> {
+                            Throwable root = (ex instanceof CompletionException && ex.getCause() != null) ? ex.getCause() : ex;
+                            log.error("Async task failed (skipping). cause={}", root.toString(), root);
+                            return null;
+                        }))
+                .collect(Collectors.toList());
+
+        // Global timeout + kısmi başarı toplama
+        try {
+            CompletableFuture
+                    .allOf(futures.toArray(CompletableFuture[]::new))
+                    .orTimeout(globalTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .join();
+        } catch (Throwable t) {
+            log.warn("Parallel block timed out/failed, will collect partial results. cause={}", t.toString());
+            // kalanları iptal et
+            futures.forEach(f -> {
+                if (!f.isDone()) f.cancel(true);
+            });
+        }
+
+        // Sadece başarıyla bitenleri al
+        List<LetterRequestDto> pageResult = futures.stream()
+                .filter(f -> f.isDone() && !f.isCompletedExceptionally() && !f.isCancelled())
+                .map(CompletableFuture::join)
+                .filter(Objects::nonNull)
+                //.sorted(Comparator.comparing(LetterRequestDto::getSorguTarihi, Comparator.naturalOrder()))
+                .collect(Collectors.toList());
+
+        if (pageResult.size() != page.size()) {
+            log.warn("Partial success on page {}: expected {} got {}", activePage, page.size(), pageResult.size());
+        }
+
+        log.debug("handleGetLetterRequestDtoTransaction completed. page={} size={} out={}",
+                activePage, pageSize, pageResult.size());
+
+        // --- 4) Response (toplam boyut/sayfa bilgisi orijinal sözleşmeye uygun)
+        return new LetterRequestListePageDTO(pageResult, totalSize, totalPage, Sort.unsorted());
+    }
+
+    private List<LetterNotifyLogDTO> preparedNotifyLogDto(LetterItem letterItem) {
+        log.info("preparedNotifyLogDto method called with parameters: letterItem={}", letterItem);
+        //prepared-notifylog
+        return letterNotificationLogService.getLetterNotificationLogRecords(letterItem.getRequestId().toString(),
+                        letterItem.getId())
+                .stream()
+                .map(letterNotificationLog -> {
+                    LetterNotifyLogDTO notifyLogDTO = new LetterNotifyLogDTO();
+                    letterNotificationLogConverterService.doConvertToDto(notifyLogDTO, letterNotificationLog);
+                    return notifyLogDTO;
+
+                }).collect(Collectors.toList());
+    }
+
+
+}
+
+
+
+
+//25082025
 package tr.gov.tcmb.ogmdfif.service.impl;
 
 import lombok.RequiredArgsConstructor;
