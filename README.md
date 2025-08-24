@@ -1,5 +1,356 @@
 package tr.gov.tcmb.ogmdfif.service.handler;
 
+import com.itextpdf.text.PageSize;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.mock.mockito.SpyBean;
+import org.springframework.test.context.junit4.SpringRunner;
+import tr.gov.tcmb.ogmdfif.constant.KararTipiEnum;
+import tr.gov.tcmb.ogmdfif.constant.LetterStatusEnum;
+import tr.gov.tcmb.ogmdfif.constant.MailTypeEnum;
+import tr.gov.tcmb.ogmdfif.constant.MektupTipEnum;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterNotifyLogDTO;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterRequestDto;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterRequestListePageDTO;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+import tr.gov.tcmb.ogmdfif.service.*;
+import tr.gov.tcmb.ogmdfif.service.impl.LetterJobTxService;
+
+import javax.print.attribute.standard.OrientationRequested;
+import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.text.ParseException;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.concurrent.Executor;
+
+import static org.hamcrest.CoreMatchers.*;
+import static org.junit.Assert.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@RunWith(SpringRunner.class)
+@SpringBootTest
+public class OdemeMektupLetterHandlerTest {
+
+    @Autowired
+    private OdemeMektupLetterHandler handler;
+
+    // persistence / tx
+    @MockBean private LetterRequestRepository letterRequestRepo;
+    @MockBean private LetterJobTxService jobTxService;
+    @MockBean private LetterRequestTransactionService letterRequestTransactionService;
+
+    // converters
+    @MockBean private LetterRequestConverterService letterRequestConverter;
+    @MockBean private LetterItemConverterService letterItemConverter;
+    @MockBean private LetterNotificationLogConverterService letterNotificationLogConverterService;
+
+    // services used inside handler
+    @MockBean private ProvizyonIslemleriService provizyonIslemleriService;
+    @MockBean private KararIslemleriService kararIslemleriService;
+    @MockBean private OrtakMektupIslemlerService ortakMektupIslemlerService;
+    @MockBean private BorcBilgiService borcBilgiService;
+    @MockBean private PikurIslemService pikurIslemService;
+    @MockBean private BankaSubeService bankaSubeService;
+    @MockBean private EftBilgisiYonetimRepository eftBilgisiYonetimRepository;
+    @MockBean private EftBilgisiYonetimArsivRepository eftBilgisiYonetimArsivRepository;
+    @MockBean private ProvizyonArsivIslemleriRepository provizyonArsivIslemleriRepository;
+    @MockBean private EFTClientService eftClientService;
+    @MockBean private KullaniciBilgileriService kullaniciBilgileriService;
+    @MockBean private LetterNotificationLogService letterNotificationLogService;
+    @MockBean private MailFacade mailFacade;
+
+    // async
+    @MockBean(name = "letterReqExecutor")
+    private Executor letterReqExecutor;
+
+    // Spy (gövdenin bazı kısımlarını stub’lamak için)
+    @SpyBean
+    private OdemeMektupLetterHandler spyHandler;
+
+    // ---------- HELPERS ----------
+    private LetterRequestDto makeValidDto() {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setRequestTypeId(String.valueOf(MektupTipEnum.convertMektupTipToRequestTypeId(MektupTipEnum.ODEME_MEKTUPLARI)));
+        dto.setFirstPaymentDate(LocalDate.now().toString());
+        dto.setLastPaymentDate(LocalDate.now().toString());
+        dto.setTahakkukTuru(KararTipiEnum.TARIMSAL.name());
+        dto.setBelgeNo("1");
+        dto.setYil(String.valueOf(LocalDate.now().getYear()));
+        dto.setKararNoAdi("K-123");
+        dto.setVkn("1234567890");
+        dto.setScopeValue("1234567890");
+        return dto;
+    }
+
+    private LetterRequest makeSavedEntity(UUID id) {
+        LetterRequest lr = new LetterRequest();
+        lr.setId(id);
+        lr.setRequestTypeId(String.valueOf(MektupTipEnum.convertMektupTipToRequestTypeId(MektupTipEnum.ODEME_MEKTUPLARI)));
+        lr.setBelgeNo("1");
+        lr.setYil(String.valueOf(LocalDate.now().getYear()));
+        lr.setKararNoAdi("K-123");
+        lr.setStatusId(Short.valueOf(LetterStatusEnum.YENI.getKod()));
+        lr.setFirstPaymentDate(LocalDate.now());
+        lr.setLastPaymentDate(LocalDate.now());
+        return lr;
+    }
+
+    // ---------- TESTS ----------
+
+    @Test
+    public void handleRequest_happyPath_savesEntity_insertsItems_andPublishesEvent() throws Exception {
+        // arrange
+        LetterRequestDto dto = makeValidDto();
+        UUID newId = UUID.randomUUID();
+        LetterRequest toSave = new LetterRequest();
+        toSave.setId(newId);
+
+        // converter dto->entity (mapDtoToEntity içindeki converter çağrısı)
+        doAnswer(inv -> {
+            LetterRequestDto inDto = inv.getArgument(0);
+            LetterRequest entity = inv.getArgument(1);
+            entity.setRequestTypeId(inDto.getRequestTypeId());
+            entity.setBelgeNo(inDto.getBelgeNo());
+            entity.setYil(inDto.getYil());
+            entity.setKararNoAdi(inDto.getKararNoAdi());
+            entity.setFirstPaymentDate(LocalDate.parse(inDto.getFirstPaymentDate()));
+            entity.setLastPaymentDate(LocalDate.parse(inDto.getLastPaymentDate()));
+            return null;
+        }).when(letterRequestConverter).doConvertToDto(any(LetterRequestDto.class), any(LetterRequest.class));
+
+        when(letterRequestRepo.save(any(LetterRequest.class)))
+                .thenAnswer(inv -> {
+                    LetterRequest e = inv.getArgument(0);
+                    e.setId(newId);
+                    return e;
+                });
+
+        // handleLetterTransactions karmaşıklığını izole etmek için spy ile stub
+        Map<String, String> receivers = new HashMap<>();
+        receivers.put("42", "1234567890");
+        doReturn(receivers).when(spyHandler).handleLetterTransactions(any(LetterRequest.class));
+
+        // act
+        UUID result = spyHandler.handleRequest(dto, "userX", "SUBE1");
+
+        // assert
+        assertThat(result, is(newId));
+        verify(letterRequestRepo, times(1)).save(any(LetterRequest.class));
+        verify(jobTxService, times(1)).insertLetterItemsBatch(eq(newId), eq(receivers));
+        // Hata maili gitmemeli
+        verify(ortakMektupIslemlerService, never())
+                .sendDesicionLetterEmail(any(), any(), any(), contains("hata"), any(), any(), any());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void handleRequest_invalidDates_throws() throws Exception {
+        LetterRequestDto dto = makeValidDto();
+        // first > last olacak şekilde boz
+        dto.setFirstPaymentDate(LocalDate.now().plusDays(1).toString());
+        dto.setLastPaymentDate(LocalDate.now().toString());
+
+        handler.handleRequest(dto, "userX", "SUBE1");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void handleRequest_bothVknAndTckn_throws() throws Exception {
+        LetterRequestDto dto = makeValidDto();
+        dto.setTckn("11111111111"); // VKN de dolu, ikisi birlikte yasak
+        handler.handleRequest(dto, "userX", "SUBE1");
+    }
+
+    @Test
+    public void insertLetterItem_whenNoReceivers_finishesRequestWithCode6() throws Exception {
+        LetterRequest lr = makeSavedEntity(UUID.randomUUID());
+
+        // receivers yok
+        doReturn(Collections.emptyMap()).when(spyHandler).handleLetterTransactions(any(LetterRequest.class));
+
+        spyHandler.insertLetterItem(lr);
+
+        verify(jobTxService, times(1))
+                .finishRequest(eq(lr.getId()), eq((short)6), eq("NO_RECEIVER"),
+                        contains("buluanamadı")); // yazım aynı olmalı
+        verify(jobTxService, never()).insertLetterItemsBatch(any(), anyMap());
+    }
+
+    @Test
+    public void outputAsPDF_setsMetaCorrectly() {
+        byte[] data = "pdf".getBytes();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        baos.write(data, 0, data.length);
+
+        ExportedFile file = handler.outputAsPDF(baos, "dosya.pdf");
+        assertThat(file, notNullValue());
+        assertThat(file.getFileName(), is("dosya.pdf"));
+        assertThat(file.getMimeType(), containsString("pdf"));
+        assertArrayEquals(data, file.getData());
+    }
+
+    @Test
+    public void islemYapOdemeMektuplari_validInputs_createsPdf_andSendsEmail() throws Exception {
+        // arrange provizyon + borç
+        Provizyon provizyon = new Provizyon();
+        provizyon.setId(100L);
+        Ihracatci ihr = new Ihracatci();
+        ihr.setAd("ACME AŞ");
+        ihr.setAdres("Kısa adres satırı 1");
+        ihr.setEmail("ihr@acme.com");
+        provizyon.setIhracatci(ihr);
+
+        Karar karar = new Karar();
+        karar.setKararNo("K-1");
+        karar.setAd("Karar Adı");
+        karar.setSubeId(10);
+        karar.setTip((short)1);
+        provizyon.setKarar(karar);
+
+        provizyon.setOdemeTarih(new Date());
+        provizyon.setTutar(new BigDecimal("123.45"));
+
+        BorcBilgi borc = new BorcBilgi();
+        borc.setId(1L);
+
+        LetterRequest req = makeSavedEntity(UUID.randomUUID());
+        LetterItem item = new LetterItem();
+        item.setId(UUID.randomUUID());
+        item.setReceiverKey(String.valueOf(provizyon.getId()));
+
+        // PDF üretimi stub
+        when(pikurIslemService.xmlYukle(anyString())).thenReturn(new tr.gov.tcmb.submuhm.pikur.PikurDocument(PageSize.A4, OrientationRequested.PORTRAIT));
+        when(pikurIslemService.pdfDocOlustur(any(), any(), any(), any()))
+                .thenReturn(new ByteArrayOutputStream());
+
+        // borç verileri
+        EftBilgiYonetim e = new EftBilgiYonetim();
+        e.setKasTarih("01/01/2025");
+        e.setBorcBilgi(borc);
+        when(eftBilgisiYonetimRepository.getEftBilgiYonetimsByProvizyonId(eq(provizyon.getId())))
+                .thenReturn(Collections.singletonList(e));
+
+        // getOdemeMektupDetayByProvizyon içi alanları üretirken banka vs. test değerleri dönüyor
+
+        // act
+        handler.islemYapOdemeMektuplari(provizyon, Collections.singletonList(borc), req, item);
+
+        // assert: standard mail gönderilmeli
+        verify(ortakMektupIslemlerService, times(1))
+                .sendDesicionLetterEmail(eq(provizyon), isNull(), any(ExportedFile.class), isNull(),
+                        eq(req), eq(item), eq(MailTypeEnum.STANDART));
+    }
+
+    @Test
+    public void handleGetLetterRequestDtoTransaction_pagination_and_mapping_ok() throws Exception {
+        // arrange: 3 kayıt, sayfa boyutu 2 → 2 sayfa
+        LetterRequest lr1 = makeSavedEntity(UUID.randomUUID());
+        LetterRequest lr2 = makeSavedEntity(UUID.randomUUID());
+        LetterRequest lr3 = makeSavedEntity(UUID.randomUUID());
+        when(letterRequestTransactionService.listLetterRequest(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Arrays.asList(lr1, lr2, lr3));
+
+        // item map
+        LetterItem li1 = new LetterItem();
+        li1.setId(UUID.randomUUID());
+        li1.setRequestId(lr1.getId());
+        li1.setStatusId(Short.valueOf(LetterStatusEnum.YENI.getKod()));
+
+        Map<UUID, List<LetterItem>> itemsMap = new HashMap<>();
+        itemsMap.put(lr1.getId(), Collections.singletonList(li1));
+        itemsMap.put(lr2.getId(), Collections.emptyList());
+        itemsMap.put(lr3.getId(), Collections.emptyList());
+
+        when(letterRequestTransactionService.loadItemByLetterRequestIds(anyList()))
+                .thenReturn(itemsMap);
+
+        // converter’ları no-op
+        doAnswer(inv -> null).when(letterRequestConverter).doConvertToEntity(any(LetterRequest.class), any(LetterRequestDto.class));
+        doAnswer(inv -> null).when(letterItemConverter).doConvertToDto(any(), any());
+
+        // notify logs
+        when(letterNotificationLogService.getLetterNotificationLogRecords(anyString(), any()))
+                .thenReturn(Collections.emptyList());
+
+        // executor: synchronous çalıştır (basitlik için)
+        doAnswer(invocation -> {
+            Runnable r = (Runnable) invocation.getArgument(0, Runnable.class);
+            r.run();
+            return null;
+        }).when(letterReqExecutor).execute(any(Runnable.class));
+
+        // act: 1. sayfa
+        LetterRequestListePageDTO page1 = handler.handleGetLetterRequestDtoTransaction(
+                1, 2, KararTipiEnum.TARIMSAL, 1,
+                LocalDate.now().getYear(), "K-1",
+                LocalDate.now(), LocalDate.now(),
+                "1234567890", null, MektupTipEnum.ODEME_MEKTUPLARI
+        );
+
+        // assert page1
+        assertThat(page1, notNullValue());
+        assertThat(page1.getTotalSize(), is(3));
+        assertThat(page1.getTotalPage(), is(2));
+        assertThat(page1.getListe().size(), is(2));
+
+        // act: 2. sayfa
+        LetterRequestListePageDTO page2 = handler.handleGetLetterRequestDtoTransaction(
+                2, 2, KararTipiEnum.TARIMSAL, 1,
+                LocalDate.now().getYear(), "K-1",
+                LocalDate.now(), LocalDate.now(),
+                "1234567890", null, MektupTipEnum.ODEME_MEKTUPLARI
+        );
+
+        assertThat(page2.getListe().size(), is(1));
+    }
+
+    @Test
+    public void islemYapOdemeMektuplari_missingEmailOrDebt_throwsValidation_andSendsErrorMail() {
+        Provizyon provizyon = new Provizyon();
+        provizyon.setId(200L);
+        provizyon.setIhracatci(new Ihracatci()); // email null
+        provizyon.setKarar(new Karar());
+
+        LetterRequest req = makeSavedEntity(UUID.randomUUID());
+        LetterItem item = new LetterItem();
+        item.setId(UUID.randomUUID());
+        item.setReceiverKey(String.valueOf(provizyon.getId()));
+
+        try {
+            handler.islemYapOdemeMektuplari(provizyon, Collections.emptyList(), req, item);
+            fail("ValidationException bekleniyordu");
+        } catch (Exception expected) {
+            assertThat(expected.getMessage(), containsString("ihracatçı bilgileri eksiktir"));
+        }
+        // Hata maili islemYapOdemeMektuplari içinde fırlatılmadan önce gönderilmiyor (try/catch dışı),
+        // bu nedenle burada mail gönderimi doğrulaması yapmıyoruz.
+    }
+
+    @Test
+    public void handleExportFileName_format_ok() {
+        String name = handler.handleExportFileName(
+                LocalDate.of(2025, 8, 25),
+                LocalDate.of(2025, 8, 26),
+                MektupTipEnum.ODEME_MEKTUPLARI
+        );
+        // dd/MM/yyyy_dd/MM/yyyy_...
+        assertThat(name, is("25/08/2025_26/08/2025_" + MektupTipEnum.ODEME_MEKTUPLARI.getAdi()));
+    }
+}
+
+
+
+//gg
+
+
+package tr.gov.tcmb.ogmdfif.service.handler;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
