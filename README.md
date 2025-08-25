@@ -1,3 +1,342 @@
+package tr.gov.tcmb.ogmdfif.service.handler;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.mock.mockito.SpyBean;
+import org.springframework.test.context.junit4.SpringRunner;
+import org.springframework.test.util.AopTestUtils;
+import org.springframework.test.util.ReflectionTestUtils;
+import tr.gov.tcmb.ogmdfif.constant.*;
+import tr.gov.tcmb.ogmdfif.model.dto.LetterRequestDto;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.repository.EftBilgisiYonetimArsivRepository;
+import tr.gov.tcmb.ogmdfif.repository.EftBilgisiYonetimRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+import tr.gov.tcmb.ogmdfif.service.*;
+import tr.gov.tcmb.ogmdfif.service.impl.LetterJobTxService;
+import tr.gov.tcmb.submuhm.pikur.model.veri.DocGrupVeri;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.concurrent.Executor;
+
+import static org.junit.Assert.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+/**
+ * JUnit4 + SpringRunner + @SpringBootTest
+ * Yalnızca kullanıcı mesajındaki metotları kapsar.
+ */
+@RunWith(SpringRunner.class)
+@SpringBootTest
+public class OdemeMektupLetterHandlerSpringTest {
+
+    // SUT
+    @SpyBean
+    private OdemeMektupLetterHandler handler;
+
+    // ---- bağımlılıklar (Spring’e @MockBean) ----
+    @MockBean private ProvizyonIslemleriService provizyonIslemleriService;
+    @MockBean private KararIslemleriService kararIslemleriService;
+    @MockBean private OrtakMektupIslemlerService ortakMektupIslemlerService;
+    @MockBean private EFTClientService eftClientService;
+    @MockBean private EftBilgisiYonetimArsivRepository eftBilgisiYonetimArsivRepository;
+    @MockBean private ProvizyonArsivIslemleriRepository provizyonArsivIslemleriRepository;
+    @MockBean private BorcBilgiService borcBilgiService;
+    @MockBean private PikurIslemService pikurIslemService;
+    @MockBean private BankaSubeService bankaSubeService;
+    @MockBean private EftBilgisiYonetimRepository eftBilgisiYonetimRepository;
+    @MockBean private LetterRequestRepository letterRequestRepo;
+    @MockBean private org.springframework.context.ApplicationEventPublisher eventPublisher;
+    @MockBean private LetterRequestConverterService letterRequestConverter;
+    @MockBean private LetterJobTxService jobTxService;
+    @MockBean private LetterItemConverterService letterItemConverter;
+    @MockBean private KullaniciBilgileriService kullaniciBilgileriService;
+    @MockBean private LetterRequestTransactionService letterRequestTransactionService;
+    @MockBean private LetterNotificationLogConverterService letterNotificationLogConverterService;
+    @MockBean private LetterNotificationLogService letterNotificationLogService;
+    @MockBean private MailFacade mailFacade;
+
+    @MockBean(name = "letterReqExecutor")
+    private Executor letterReqExecutor;
+
+    private OdemeMektupLetterHandler target; // AOP proxy hedefi (tx açmamak için)
+
+    @Before
+    public void setUp() {
+        // Proxy’yi by-pass edebilmek için hedef objeyi al
+        target = AopTestUtils.getTargetObject(handler);
+
+        // @Value alanlarını set et
+        ReflectionTestUtils.setField(handler, "perTaskTimeoutMs", 3000L);
+        ReflectionTestUtils.setField(handler, "globalTimeoutMs", 10000L);
+
+        // Executor’u senkron çalıştır
+        doAnswer(inv -> { ((Runnable)inv.getArgument(0)).run(); return null; })
+                .when(letterReqExecutor).execute(any(Runnable.class));
+    }
+
+    // ---------------- handleInitialLetterRequestTransaction ----------------
+
+    @Test
+    public void handleInitial_mapsDto_andDelegatesTo_handleRequest() throws Exception {
+        LocalDate first = LocalDate.of(2025, 8, 24);
+        LocalDate last  = LocalDate.of(2025, 8, 25);
+        UUID expected = UUID.randomUUID();
+
+        when(kullaniciBilgileriService.getKullaniciSubeId()).thenReturn("SUBE-42");
+
+        try (MockedStatic<SAMUtils> mocked = Mockito.mockStatic(SAMUtils.class)) {
+            mocked.when(SAMUtils::getSimdikiKullaniciSicili).thenReturn("SICIL-7");
+
+            ArgumentCaptor<LetterRequestDto> dtoCap = ArgumentCaptor.forClass(LetterRequestDto.class);
+            doReturn(expected).when(handler).handleRequest(dtoCap.capture(), eq("SICIL-7"), eq("SUBE-42"));
+
+            UUID out = handler.handleInitialLetterRequestTransaction(
+                    KararTipiEnum.TARIMSAL, 99, 2025, "K-123",
+                    first, last, "VKN123", null,
+                    MektupTipEnum.ODEME_MEKTUPLARI
+            );
+
+            assertEquals(expected, out);
+            LetterRequestDto dto = dtoCap.getValue();
+            assertEquals(String.valueOf(MektupTipEnum.convertMektupTipToRequestTypeId(MektupTipEnum.ODEME_MEKTUPLARI)), dto.getRequestTypeId());
+            assertEquals(first.toString(), dto.getFirstPaymentDate());
+            assertEquals(last.toString(), dto.getLastPaymentDate());
+            assertEquals(KararTipiEnum.TARIMSAL.name(), dto.getTahakkukTuru());
+            assertEquals("99", dto.getBelgeNo());
+            assertEquals("2025", dto.getYil());
+            assertEquals("K-123", dto.getKararNoAdi());
+            assertEquals("VKN123", dto.getVkn());
+            assertNull(dto.getTckn());
+            assertEquals("VKN123", dto.getScopeValue());
+        }
+    }
+
+    // ---------------- odemeMektupDetayBorcHazirlaArsiv (private) ----------------
+
+    @Test
+    public void odemeMektupDetayBorcHazirlaArsiv_buildsGroup_ok() throws Exception {
+        EftBilgiYonetimArsiv a = new EftBilgiYonetimArsiv();
+        a.setKasTarih("01/01/2025");
+
+        DocGrupVeri grp = ReflectionTestUtils.invokeMethod(target,
+                "odemeMektupDetayBorcHazirlaArsiv", a);
+
+        assertNotNull(grp);
+        assertEquals("BORCBILGILERI", grp.getGrupAd());
+    }
+
+    // ---------------- getOdemeMektupBorcBilgileri(ProvizyonArsiv, ...) ----------------
+
+    @Test
+    public void getOdemeMektupBorcBilgileri_arsiv_filtersKasTarih_andMaps() {
+        ProvizyonArsiv p = new ProvizyonArsiv();
+        p.setId(10L);
+
+        EftBilgiYonetimArsiv e1 = new EftBilgiYonetimArsiv(); e1.setKasTarih("01/01/2025");
+        EftBilgiYonetimArsiv e2 = new EftBilgiYonetimArsiv(); e2.setKasTarih(null);
+
+        when(eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(10L))
+                .thenReturn(Arrays.asList(e1, e2));
+
+        List<DocGrupVeri> out = target.getOdemeMektupBorcBilgileri(p, false);
+        assertEquals(1, out.size());
+        assertEquals("BORCBILGILERI", out.get(0).getGrupAd());
+    }
+
+    // ---------------- odemeMektupDetayBorcHazirla (private) ----------------
+
+    @Test
+    public void odemeMektupDetayBorcHazirla_buildsGroup_forSgk_andNonSgk() throws Exception {
+        // SGK kolu
+        EftBilgiYonetim eSgk = new EftBilgiYonetim();
+        eSgk.setKasTarih("01/01/2025");
+        BorcBilgi b = new BorcBilgi();
+        b.setBorcTipi(BorcTipEnum.SGK.getKod());
+        b.setAliciAdi("SGK");
+        b.setTutar(new BigDecimal("123.45"));
+        eSgk.setBorcBilgi(b);
+
+        DocGrupVeri g1 = ReflectionTestUtils.invokeMethod(target, "odemeMektupDetayBorcHazirla", eSgk);
+        assertEquals("BORCBILGILERI", g1.getGrupAd());
+
+        // SGK olmayan kol
+        EftBilgiYonetim eOther = new EftBilgiYonetim();
+        eOther.setKasTarih("02/01/2025");
+        DocGrupVeri g2 = ReflectionTestUtils.invokeMethod(target, "odemeMektupDetayBorcHazirla", eOther);
+        assertEquals("BORCBILGILERI", g2.getGrupAd());
+    }
+
+    // ---------------- getOdemeMektupBorcBilgileri(Provizyon, ...) ----------------
+
+    @Test
+    public void getOdemeMektupBorcBilgileri_normal_filtersKasTarih_andMaps() {
+        Provizyon p = new Provizyon(); p.setId(9L);
+
+        EftBilgiYonetim e1 = new EftBilgiYonetim(); e1.setKasTarih("01/01/2025");
+        EftBilgiYonetim e2 = new EftBilgiYonetim(); e2.setKasTarih(null);
+
+        when(eftBilgisiYonetimRepository.getEftBilgiYonetimsByProvizyonId(9L))
+                .thenReturn(Arrays.asList(e1, e2));
+
+        List<DocGrupVeri> out = target.getOdemeMektupBorcBilgileri(p, false);
+        assertEquals(1, out.size());
+        assertEquals("BORCBILGILERI", out.get(0).getGrupAd());
+    }
+
+    // ---------------- getProvizyonArsivToplamTutar ----------------
+
+    @Test
+    public void getProvizyonArsivToplamTutar_sums_whenKasTarihPresent() {
+        ProvizyonArsiv p = new ProvizyonArsiv(); p.setId(7L);
+
+        EftBilgiYonetimArsiv y1 = new EftBilgiYonetimArsiv();
+        y1.setKasTarih("01/01/2025");
+        y1.setTutar(new BigDecimal("10"));
+        BorcBilgiArsiv bb1 = new BorcBilgiArsiv(); bb1.setId(100L);
+        y1.setBorcBilgiArsiv(bb1);
+
+        EftBilgiYonetimArsiv y2 = new EftBilgiYonetimArsiv();
+        y2.setKasTarih("01/01/2025");
+        y2.setTutar(new BigDecimal("5"));
+        BorcBilgiArsiv bb2 = new BorcBilgiArsiv(); bb2.setId(200L);
+        y2.setBorcBilgiArsiv(bb2);
+
+        when(eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(7L))
+                .thenReturn(Arrays.asList(y1, y2));
+        when(borcBilgiService.getBorcBilgiArsivList(p)).thenReturn(Arrays.asList(bb1, bb2));
+
+        BigDecimal sum = target.getProvizyonArsivToplamTutar(p, false);
+        assertEquals(new BigDecimal("15"), sum);
+    }
+
+    // ---------------- getOdemeMektupDetayByProvizyon(ProvizyonArsiv) ----------------
+
+    @Test
+    public void getOdemeMektupDetayByProvizyon_arsiv_includesDetay_andBorc() {
+        ProvizyonArsiv p = new ProvizyonArsiv();
+        p.setId(5L);
+
+        Ihracatci ihr = new Ihracatci();
+        ihr.setAd("ACME");
+        ihr.setAdres("Adres kisa.");
+        p.setIhracatci(ihr);
+
+        Karar k = new Karar();
+        k.setKararNo("K-1");
+        k.setAd("Karar Adı");
+        k.setSubeId(10);
+        k.setTip((short)1);
+        p.setKarar(k);
+
+        p.setOdemeTarih(new Date());
+
+        EftBilgiYonetimArsiv y = new EftBilgiYonetimArsiv(); y.setKasTarih("01/01/2025");
+        when(eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(5L))
+                .thenReturn(Collections.singletonList(y));
+
+        // toplam tutar için
+        EftBilgiYonetimArsiv ySum = new EftBilgiYonetimArsiv();
+        ySum.setKasTarih("01/01/2025");
+        ySum.setTutar(new BigDecimal("20"));
+        BorcBilgiArsiv bb = new BorcBilgiArsiv(); bb.setId(300L);
+        ySum.setBorcBilgiArsiv(bb);
+        when(eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(5L))
+                .thenReturn(Arrays.asList(y, ySum));
+        when(borcBilgiService.getBorcBilgiArsivList(p)).thenReturn(Collections.singletonList(bb));
+
+        List<DocGrupVeri> out = target.getOdemeMektupDetayByProvizyon(p);
+        assertFalse(out.isEmpty());
+        assertEquals("DETAY", out.get(0).getGrupAd());
+        assertTrue(out.stream().anyMatch(g -> "BORCBILGILERI".equals(g.getGrupAd())));
+    }
+
+    // ---------------- getOdemeMektupDetayByProvizyon(Provizyon) ----------------
+
+    @Test
+    public void getOdemeMektupDetayByProvizyon_normal_includesDetay_andBorc() {
+        Provizyon p = new Provizyon();
+        p.setId(4L);
+
+        Ihracatci ihr = new Ihracatci();
+        ihr.setAd("BETA");
+        ihr.setAdres("Kisa adres");
+        ihr.setEmail("mail@beta.com");
+        p.setIhracatci(ihr);
+
+        Karar k = new Karar();
+        k.setKararNo("K-9");
+        k.setAd("Karar");
+        k.setSubeId(20);
+        k.setTip((short)1);
+        p.setKarar(k);
+
+        p.setOdemeTarih(new Date());
+        p.setTutar(new BigDecimal("77"));
+
+        EftBilgiYonetim e = new EftBilgiYonetim(); e.setKasTarih("01/01/2025");
+        when(eftBilgisiYonetimRepository.getEftBilgiYonetimsByProvizyonId(4L))
+                .thenReturn(Collections.singletonList(e));
+
+        List<DocGrupVeri> out = target.getOdemeMektupDetayByProvizyon(p);
+        assertFalse(out.isEmpty());
+        assertEquals("DETAY", out.get(0).getGrupAd());
+        assertTrue(out.stream().anyMatch(g -> "BORCBILGILERI".equals(g.getGrupAd())));
+    }
+
+    // ---------------- validators ----------------
+
+    @Test
+    public void isValidProvizyonAndBorcBilgi_true_whenAllPresent() throws Exception {
+        Provizyon p = new Provizyon();
+        Ihracatci i = new Ihracatci(); i.setEmail("x@y.z");
+        p.setIhracatci(i);
+        List<BorcBilgi> list = Collections.singletonList(new BorcBilgi());
+
+        boolean ok = ReflectionTestUtils.invokeMethod(target, "isValidProvizyonAndBorcBilgi", p, list);
+        assertTrue(ok);
+    }
+
+    @Test
+    public void isValidProvizyonAndBorcBilgi_false_whenMissing() throws Exception {
+        Provizyon p = new Provizyon(); // ihracatci null
+        boolean ok = ReflectionTestUtils.invokeMethod(target, "isValidProvizyonAndBorcBilgi", p, Collections.emptyList());
+        assertFalse(ok);
+    }
+
+    @Test
+    public void isValidProvizyonArsivAndBorcBilgiArsiv_true_whenAllPresent() throws Exception {
+        ProvizyonArsiv p = new ProvizyonArsiv();
+        Ihracatci i = new Ihracatci(); i.setEmail("a@b.c");
+        p.setIhracatci(i);
+        List<BorcBilgiArsiv> list = Collections.singletonList(new BorcBilgiArsiv());
+
+        boolean ok = ReflectionTestUtils.invokeMethod(target, "isValidProvizyonArsivAndBorcBilgiArsiv", p, list);
+        assertTrue(ok);
+    }
+
+    @Test
+    public void isValidProvizyonArsivAndBorcBilgiArsiv_false_whenMissing() throws Exception {
+        ProvizyonArsiv p = new ProvizyonArsiv();
+        boolean ok = ReflectionTestUtils.invokeMethod(target, "isValidProvizyonArsivAndBorcBilgiArsiv", p, Collections.emptyList());
+        assertFalse(ok);
+    }
+}
+
+  
+  
+  
+  ///seeeee
   @Override
     public UUID handleInitialLetterRequestTransaction(KararTipiEnum belgeTip,
                                                       Integer belgeNo,
