@@ -1,3 +1,316 @@
+  @Override
+    public UUID handleInitialLetterRequestTransaction(KararTipiEnum belgeTip,
+                                                      Integer belgeNo,
+                                                      Integer belgeYil,
+                                                      String kararNo,
+                                                      LocalDate ilkOdemeTarih,
+                                                      LocalDate sonOdemeTarih,
+                                                      String vkn,
+                                                      String tckn,
+                                                      MektupTipEnum mektupTip) throws Exception {
+        LetterRequestDto dto = new LetterRequestDto();
+        dto.setRequestTypeId(String.valueOf(MektupTipEnum.convertMektupTipToRequestTypeId(mektupTip)));
+        dto.setFirstPaymentDate(String.valueOf(ilkOdemeTarih));
+        dto.setLastPaymentDate(String.valueOf(sonOdemeTarih));
+        dto.setTahakkukTuru(belgeTip != null ? belgeTip.name() : null);
+        dto.setBelgeNo(belgeNo != null ? belgeNo.toString() : null);
+        dto.setYil(belgeYil != null ? belgeYil.toString() : null);
+        dto.setKararNoAdi(kararNo);
+        dto.setVkn(vkn);
+        dto.setTckn(tckn);
+        dto.setScopeValue(vkn != null ? vkn : tckn);
+
+        String userSicil = SAMUtils.getSimdikiKullaniciSicili();
+        String subeId = kullaniciBilgileriService.getKullaniciSubeId();
+
+        // Request kaydetme
+        return handleRequest(dto, userSicil, subeId);
+    }
+
+
+   private DocGrupVeri odemeMektupDetayBorcHazirlaArsiv(EftBilgiYonetimArsiv eftBilgiYonetimArsiv) throws Exception {
+
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+        LocalDate localDate = LocalDate.parse(eftBilgiYonetimArsiv.getKasTarih(), formatter);
+        //MusteriHesabaOdeme eftMesaj = (MusteriHesabaOdeme) eftClientService.getGunlukKasMesajBySorguNoAndOdemeTarihi(eftBilgiYonetimArsiv.getKasSorguNo(), localDate);
+
+        DocGrupVeri detayBorclar = new DocGrupVeri();
+        detayBorclar.setGrupAd("BORCBILGILERI");
+
+        /*if (eftBilgiYonetimArsiv.getBorcBilgiArsiv() != null && BorcTipEnum.SGK.getKod().equals(eftBilgiYonetimArsiv.getBorcBilgiArsiv().getBorcTipi())) {
+            BorcBilgiArsiv borcBilgiArsiv = eftBilgiYonetimArsiv.getBorcBilgiArsiv();
+            detayBorclar.addAlanVeri("BORCALICISI", borcBilgiArsiv.getAliciAdi());
+            detayBorclar.addAlanVeri("BORCTUTARI", borcBilgiArsiv.getTutar());
+        } else {
+            detayBorclar.addAlanVeri("BORCALICISI", eftMesaj.getAlAd());
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(StringUtil.formatVirgulToNokta(eftMesaj.getTtr())));
+        }*/
+
+
+            detayBorclar.addAlanVeri("BORCALICISI", "test");
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(1));
+
+
+        /*String eftBankaKoduAdi = eftMesaj.getAlKK() + "-"
+                + bankaSubeService.getBankaForBankaKodu(eftMesaj.getAlKK()).getAd();*/
+        String eftBankaKoduAdi = "test";
+
+        StringBuilder sb = new StringBuilder(eftBankaKoduAdi.trim());
+        if (sb.length() > 30) {
+            sb.setLength(30);
+        }
+        /*detayBorclar.addAlanVeri("EFTBANKAKODUADI", sb.toString());
+        detayBorclar.addAlanVeri("EFTHESAP", eftMesaj.getAlHesN());
+        detayBorclar.addAlanVeri("EFTTARIHI", eftMesaj.getTrh());
+        detayBorclar.addAlanVeri("EFTSORGUNO", eftMesaj.getSN());
+        detayBorclar.addAlanVeri("EFTACIKLAMA", eftMesaj.getAcklm());*/
+
+        detayBorclar.addAlanVeri("EFTBANKAKODUADI", "test");
+        detayBorclar.addAlanVeri("EFTHESAP", "test");
+        detayBorclar.addAlanVeri("EFTTARIHI", "test");
+        detayBorclar.addAlanVeri("EFTSORGUNO", "test");
+        detayBorclar.addAlanVeri("EFTACIKLAMA", "test");
+
+        return detayBorclar;
+    }
+
+
+  public List<DocGrupVeri> getOdemeMektupBorcBilgileri(ProvizyonArsiv provizyon, Boolean sadeceBorcYazdir) {
+
+        List<EftBilgiYonetimArsiv> eftBilgiYonetimList = eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(provizyon.getId());
+        if (eftBilgiYonetimList == null || eftBilgiYonetimList.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return eftBilgiYonetimList.stream()
+                .filter(eftBilgiYonetim -> eftBilgiYonetim.getKasTarih() != null && !sadeceBorcYazdir)
+                .map(eftBilgiYonetim -> {
+                    try {
+                        return this.odemeMektupDetayBorcHazirlaArsiv(eftBilgiYonetim);
+                    } catch (Exception e) {
+                        System.err.println("OdemeMektupDetayBorcHazirla-arsiv hatası: " + e.getMessage()); // Hata mesajını logla
+                        return null; // veya uygun bir hata değeri döndür
+                    }
+                }).filter(Objects::nonNull)
+                .collect(Collectors.toUnmodifiableList());
+    }
+
+
+ private DocGrupVeri odemeMektupDetayBorcHazirla(EftBilgiYonetim eftBilgiYonetim) throws Exception {
+
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+        LocalDate localDate = LocalDate.parse(eftBilgiYonetim.getKasTarih(), formatter);
+        //MusteriHesabaOdeme eftMesaj = (MusteriHesabaOdeme) eftClientService.getGunlukKasMesajBySorguNoAndOdemeTarihi(eftBilgiYonetim.getKasSorguNo(), localDate);
+
+        DocGrupVeri detayBorclar = new DocGrupVeri();
+        detayBorclar.setGrupAd("BORCBILGILERI");
+
+        /*if (eftBilgiYonetim.getBorcBilgi() != null && BorcTipEnum.SGK.getKod().equals(eftBilgiYonetim.getBorcBilgi().getBorcTipi())) {
+            BorcBilgi borcBilgi = eftBilgiYonetim.getBorcBilgi();
+            detayBorclar.addAlanVeri("BORCALICISI", borcBilgi.getAliciAdi());
+            detayBorclar.addAlanVeri("BORCTUTARI", borcBilgi.getTutar());
+
+        } else {
+            detayBorclar.addAlanVeri("BORCALICISI", eftMesaj.getAlAd());
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(StringUtil.formatVirgulToNokta(eftMesaj.getTtr())));
+        }*/
+
+        //todo
+        if (eftBilgiYonetim.getBorcBilgi() != null && BorcTipEnum.SGK.getKod().equals(eftBilgiYonetim.getBorcBilgi().getBorcTipi())) {
+            BorcBilgi borcBilgi = eftBilgiYonetim.getBorcBilgi();
+            detayBorclar.addAlanVeri("BORCALICISI", borcBilgi.getAliciAdi());
+            detayBorclar.addAlanVeri("BORCTUTARI", borcBilgi.getTutar());
+
+        } else {
+            detayBorclar.addAlanVeri("BORCALICISI", "test");
+            detayBorclar.addAlanVeri("BORCTUTARI", new BigDecimal(1));
+        }
+
+        /*String eftBankaKoduAdi = eftMesaj.getAlKK() + "-"
+                + bankaSubeService.getBankaForBankaKodu(eftMesaj.getAlKK()).getAd();*/
+
+        //todo
+        String eftBankaKoduAdi = "test";
+
+
+
+        StringBuilder sb = new StringBuilder(eftBankaKoduAdi.trim());
+        if (sb.length() > 30) {
+            sb.setLength(30);
+        }
+        /*detayBorclar.addAlanVeri("EFTBANKAKODUADI", sb.toString());
+        detayBorclar.addAlanVeri("EFTHESAP", eftMesaj.getAlHesN());
+        detayBorclar.addAlanVeri("EFTTARIHI", eftMesaj.getTrh());
+        detayBorclar.addAlanVeri("EFTSORGUNO", eftMesaj.getSN());
+        detayBorclar.addAlanVeri("EFTACIKLAMA", eftMesaj.getAcklm());*/
+
+        detayBorclar.addAlanVeri("EFTBANKAKODUADI", sb.toString());
+        detayBorclar.addAlanVeri("EFTHESAP", "test");
+        detayBorclar.addAlanVeri("EFTTARIHI", "test");
+        detayBorclar.addAlanVeri("EFTSORGUNO", "test");
+        detayBorclar.addAlanVeri("EFTACIKLAMA", "test");
+
+
+        return detayBorclar;
+    }
+
+
+ public List<DocGrupVeri> getOdemeMektupBorcBilgileri(Provizyon provizyon, Boolean sadeceBorcYazdir) {
+
+        List<EftBilgiYonetim> eftBilgiYonetimList = eftBilgisiYonetimRepository.getEftBilgiYonetimsByProvizyonId(provizyon.getId());
+        if (eftBilgiYonetimList == null || eftBilgiYonetimList.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return eftBilgiYonetimList.stream()
+                .filter(eftBilgiYonetim -> eftBilgiYonetim.getKasTarih() != null && !sadeceBorcYazdir)
+                .map(eftBilgiYonetim -> {
+                    try {
+                        return this.odemeMektupDetayBorcHazirla(eftBilgiYonetim);
+                    } catch (Exception e) {
+                        log.error("OdemeMektupDetayBorcHazirla hatası: " + e.getMessage()); // Hata mesajını logla
+                        return null; // veya uygun bir hata değeri döndür
+                    }
+                }).filter(Objects::nonNull)
+                .collect(Collectors.toUnmodifiableList());
+    }
+
+  public BigDecimal getProvizyonArsivToplamTutar(ProvizyonArsiv provizyon, boolean sadeceBorcYazdir) {
+        BigDecimal toplamTutar = BigDecimal.ZERO;
+        Long provizyonId = provizyon.getId();
+        if (provizyonId == null) {
+            return toplamTutar;
+        }
+        List<EftBilgiYonetimArsiv> eftBilgiYonetimList = eftBilgisiYonetimArsivRepository.getEftBilgiYonetimArsivsByProvizyonId(provizyonId);
+        Map<BigDecimal, EftBilgiYonetimArsiv> eftBilgiYonetimMap = new HashMap<>();
+        for (EftBilgiYonetimArsiv eftBilgiYonetim : eftBilgiYonetimList) {
+            eftBilgiYonetimMap.put(new BigDecimal(String.valueOf(eftBilgiYonetim.getBorcBilgiArsiv().getId())), eftBilgiYonetim);
+        }
+        List<Long> borcIdList = eftBilgiYonetimList.stream().map(EftBilgiYonetimArsiv::getBorcBilgiArsiv).map(BorcBilgiArsiv::getId).sorted().collect(Collectors.toList());
+        List<BorcBilgiArsiv> borcBilgiList = borcBilgiService.getBorcBilgiArsivList(provizyon);
+        for (Long currentBorcId : borcIdList) {
+            BigDecimal borcId = BigDecimal.valueOf(currentBorcId);
+            if (sadeceBorcYazdir && borcBilgiList.stream().noneMatch(borcBilgi -> new BigDecimal(borcBilgi.getId()).equals(borcId))) {
+                continue;
+            }
+            EftBilgiYonetimArsiv eftBilgiYonetim = eftBilgiYonetimMap.get(borcId);
+            if (eftBilgiYonetim.getKasTarih() == null) {
+                continue;
+            }
+            toplamTutar = toplamTutar.add(eftBilgiYonetim.getTutar());
+        }
+        return toplamTutar;
+    }
+
+ public List<DocGrupVeri> getOdemeMektupDetayByProvizyon(ProvizyonArsiv provizyonArsiv) {
+        SimpleDateFormat sdfTarih = new SimpleDateFormat("dd/MM/yyyy");
+        List<DocGrupVeri> veriler = new ArrayList<>();
+        List<DocGrupVeri> borclar = getOdemeMektupBorcBilgileri(provizyonArsiv, false);
+        if (CollectionUtils.isEmpty(borclar)) {
+            return new ArrayList<>();
+        }
+        DocGrupVeri detayGrup = new DocGrupVeri();
+        detayGrup.setGrupAd("DETAY");
+        Ihracatci ihracatci = provizyonArsiv.getIhracatci();
+        detayGrup.addAlanVeri("IHRACATCIADI", ihracatci.getAd());
+        String adres1 = ihracatci.getAdres().trim();
+        String adres2 = StringUtils.EMPTY;
+        String adres3 = StringUtils.EMPTY;
+        if (adres1.length() > 50) {
+            if (adres1.length() > 100) {
+                adres3 = adres1.substring(100);
+                adres2 = adres1.substring(50, 100);
+            } else {
+                adres2 = adres1.substring(50);
+                adres1 = adres1.substring(0, 50);
+            }
+        }
+
+        detayGrup.addAlanVeri("IHRACATCIADRES1", adres1);
+        detayGrup.addAlanVeri("IHRACATCIADRES2", adres2);
+        detayGrup.addAlanVeri("IHRACATCIADRES3", adres3);
+        detayGrup.addAlanVeri("TARIH", sdfTarih.format(new Date()));
+        detayGrup.addAlanVeri("KARARNO", provizyonArsiv.getKarar().getKararNo());
+        String kararAraMetin = "sayılı %s ";
+        detayGrup.addAlanVeri("KARARADI", String.format(kararAraMetin, provizyonArsiv.getKarar().getAd()));
+        detayGrup.addAlanVeri("PROVIZYONTUTAR", getProvizyonArsivToplamTutar(provizyonArsiv, false));
+        detayGrup.addAlanVeri("ODEMETARIH", sdfTarih.format(provizyonArsiv.getOdemeTarih()));
+        SubeKoduEnum subeKoduEnum = SubeKoduEnum.getById(provizyonArsiv.getKarar().getSubeId());
+        if (SubeKoduEnum.ANKARA.equals(subeKoduEnum) && !KararTipiEnum.TARIMSAL.equals(KararTipiEnum.getBykod(provizyonArsiv.getKarar().getTip()))) {
+            subeKoduEnum = SubeKoduEnum.IDARE_MERKEZI;
+        }
+        detayGrup.addAlanVeri("TCMBSUBEADI", subeKoduEnum != null ? subeKoduEnum.getAdi() : null);
+        veriler.add(detayGrup);
+        veriler.addAll(borclar);
+        return veriler;
+    }
+
+ public List<DocGrupVeri> getOdemeMektupDetayByProvizyon(Provizyon provizyon) {
+        SimpleDateFormat sdfTarih = new SimpleDateFormat("dd/MM/yyyy");
+        List<DocGrupVeri> veriler = new ArrayList<>();
+        List<DocGrupVeri> borclar = getOdemeMektupBorcBilgileri(provizyon, false);
+        if (CollectionUtils.isEmpty(borclar)) {
+            return new ArrayList<>();
+        }
+        DocGrupVeri detayGrup = new DocGrupVeri();
+        detayGrup.setGrupAd("DETAY");
+        Ihracatci ihracatci = provizyon.getIhracatci();
+        detayGrup.addAlanVeri("IHRACATCIADI", ihracatci.getAd());
+        String adres1 = ihracatci.getAdres().trim();
+        String adres2 = StringUtils.EMPTY;
+        String adres3 = StringUtils.EMPTY;
+        if (adres1.length() > 50) {
+            if (adres1.length() > 100) {
+                adres3 = adres1.substring(100);
+                adres2 = adres1.substring(50, 100);
+            } else {
+                adres2 = adres1.substring(50);
+                adres1 = adres1.substring(0, 50);
+            }
+        }
+
+        detayGrup.addAlanVeri("IHRACATCIADRES1", adres1);
+        detayGrup.addAlanVeri("IHRACATCIADRES2", adres2);
+        detayGrup.addAlanVeri("IHRACATCIADRES3", adres3);
+        detayGrup.addAlanVeri("TARIH", sdfTarih.format(new Date()));
+        detayGrup.addAlanVeri("KARARNO", provizyon.getKarar().getKararNo());
+        String kararAraMetin = "sayılı %s ";
+        detayGrup.addAlanVeri("KARARADI", String.format(kararAraMetin, provizyon.getKarar().getAd()));
+        detayGrup.addAlanVeri("PROVIZYONTUTAR", provizyon.getTutar());
+        detayGrup.addAlanVeri("ODEMETARIH", sdfTarih.format(provizyon.getOdemeTarih()));
+
+        SubeKoduEnum subeKoduEnum = SubeKoduEnum.getById(provizyon.getKarar().getSubeId());
+        if (SubeKoduEnum.ANKARA.equals(subeKoduEnum) && !KararTipiEnum.TARIMSAL.equals(KararTipiEnum.getBykod(provizyon.getKarar().getTip()))) {
+            subeKoduEnum = SubeKoduEnum.IDARE_MERKEZI;
+        }
+        detayGrup.addAlanVeri("TCMBSUBEADI", subeKoduEnum != null ? subeKoduEnum.getAdi() : null);
+
+        veriler.add(detayGrup);
+        veriler.addAll(borclar);
+        return veriler;
+    }
+
+
+   private boolean isValidProvizyonAndBorcBilgi(Provizyon provizyon, List<BorcBilgi> borcBilgis) {
+        return provizyon != null &&
+                provizyon.getIhracatci() != null &&
+                StringUtils.isNotEmpty(provizyon.getIhracatci().getEmail()) &&
+                CollectionUtils.isNotEmpty(borcBilgis);
+    }
+
+    private boolean isValidProvizyonArsivAndBorcBilgiArsiv(ProvizyonArsiv provizyonArsiv, List<BorcBilgiArsiv> borcBilgiArsivs) {
+        return provizyonArsiv != null &&
+                provizyonArsiv.getIhracatci() != null &&
+                StringUtils.isNotEmpty(provizyonArsiv.getIhracatci().getEmail()) &&
+                CollectionUtils.isNotEmpty(borcBilgiArsivs);
+    }
+
+
+
+
+
+
+ 
+
+//////unitttt
 package tr.gov.tcmb.ogmdfif.service.handler;
 
 import com.itextpdf.text.PageSize;
