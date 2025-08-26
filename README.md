@@ -1,152 +1,133 @@
-
 -- =========================
--- Lookup Tables
+-- Lookup Tables (H2)
 -- =========================
 CREATE TABLE IF NOT EXISTS ref_letter_request_type (
-                                                       id SMALLINT PRIMARY KEY,
-                                                       name VARCHAR(50) NOT NULL UNIQUE
+    id SMALLINT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS ref_letter_scope (
-                                                id SMALLINT PRIMARY KEY,
-                                                name VARCHAR(50) NOT NULL UNIQUE
+    id SMALLINT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS ref_letter_status (
-                                                 id SMALLINT PRIMARY KEY,
-                                                 name VARCHAR(50) NOT NULL UNIQUE
+    id SMALLINT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE
 );
 
 -- =========================
--- Main Tables
+-- Main Tables (H2)
 -- =========================
 CREATE TABLE IF NOT EXISTS letter_request (
-                                              id UUID,
-                                              request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id),
-                                              scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id),
-                                              scope_value VARCHAR(20),
-                                              first_payment_date DATE NOT NULL,
-                                              last_payment_date DATE NOT NULL,
-                                              tahakkuk_turu VARCHAR(50),
-                                              belge_no VARCHAR(50),
-                                              yil INTEGER,
-                                              karar_no_adi VARCHAR(200),
-                                              firma_vkn VARCHAR(20),
-                                              uretici_tckn VARCHAR(20),
-                                              status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
-                                              created_by VARCHAR(64) NOT NULL,
-                                              branch_id VARCHAR(32) NOT NULL,
-                                              created_at TIMESTAMP NOT NULL,
-                                              updated_at TIMESTAMP NOT NULL,
-                                              updater VARCHAR(64),
-                                              attempt_count SMALLINT NOT NULL DEFAULT 0,
-                                              last_attempt_at TIMESTAMP,
-                                              next_attempt_at TIMESTAMP,
-                                              processing_started_at TIMESTAMP,
-                                              processing_finished_at TIMESTAMP,
-                                              processing_duration_ms INTEGER,
-                                              last_error_code VARCHAR(64),
-                                              last_error_message TEXT,
-                                              notify_emails TEXT,
-                                              notify_sent BOOLEAN NOT NULL DEFAULT FALSE,
-                                              notify_sent_at TIMESTAMP,
-                                              notify_to_list TEXT,
-    primary key (id,created_at)
-)
-
-
--- =========================
--- Letter Item Table (Hash Partition Simülasyonu Yok)
--- =========================
-CREATE TABLE letter_item (
-                             id                  UUID,
-                             request_id          UUID NOT NULL,
-                             receiver_key        VARCHAR(64) NOT NULL,
-                             payload_ref         VARCHAR(200),
-                             status_id           SMALLINT NOT NULL REFERENCES ref_letter_status(id),
-                             attempt_count       SMALLINT NOT NULL DEFAULT 0,
-                             last_error_code     VARCHAR(64),
-                             last_error_message  TEXT,
-                             sent_at             TIMESTAMPTZ,
-                             created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-                             updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-                             primary key (id,created_at)
-) ;
-
--- Performans indexleri
-CREATE INDEX idx_letter_item_req_status ON letter_item (request_id, status_id);
-CREATE INDEX idx_letter_item_req ON letter_item (request_id);
-
+    id UUID,
+    request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id),
+    scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id),
+    scope_value VARCHAR(20),
+    first_payment_date DATE NOT NULL,
+    last_payment_date DATE NOT NULL,
+    tahakkuk_turu VARCHAR(50),
+    belge_no VARCHAR(50),
+    yil INTEGER,
+    karar_no_adi VARCHAR(200),
+    firma_vkn VARCHAR(20),
+    uretici_tckn VARCHAR(20),
+    status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    created_by VARCHAR(64) NOT NULL,
+    branch_id VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    updater VARCHAR(64),
+    attempt_count SMALLINT NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMP,
+    next_attempt_at TIMESTAMP,
+    processing_started_at TIMESTAMP,
+    processing_finished_at TIMESTAMP,
+    processing_duration_ms INTEGER,
+    last_error_code VARCHAR(64),
+    last_error_message TEXT,
+    notify_emails TEXT,
+    notify_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    notify_sent_at TIMESTAMP,
+    notify_to_list TEXT,
+    PRIMARY KEY (id, created_at)
+);
 
 -- =========================
--- Letter Attempt Table
+-- Letter Item (H2)
 -- =========================
-CREATE TABLE letter_attempt (
-                                id              UUID,
-                                request_id      UUID NOT NULL,
-                                item_id         UUID,
-                                attempt_no      SMALLINT NOT NULL,
-                                started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                                finished_at     TIMESTAMPTZ,
-                                duration_ms     INTEGER,
-                                result          VARCHAR(20) NOT NULL, -- SUCCESS / FAIL
-                                error_code      VARCHAR(64),
-                                error_message   TEXT,
-                                primary key (id,started_at)
-) ;
+CREATE TABLE IF NOT EXISTS letter_item (
+    id                 UUID,
+    request_id         UUID NOT NULL,
+    receiver_key       VARCHAR(64) NOT NULL,
+    payload_ref        VARCHAR(200),
+    status_id          SMALLINT NOT NULL REFERENCES ref_letter_status(id),
+    attempt_count      SMALLINT NOT NULL DEFAULT 0,
+    last_error_code    VARCHAR(64),
+    last_error_message TEXT,
+    sent_at            TIMESTAMP,
+    created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, created_at)
+);
 
--- Performans için indexler
-CREATE INDEX idx_letter_attempt_req ON letter_attempt (request_id);
-CREATE INDEX idx_letter_attempt_item ON letter_attempt (item_id);
-
-
-
+CREATE INDEX IF NOT EXISTS idx_letter_item_req_status ON letter_item (request_id, status_id);
+CREATE INDEX IF NOT EXISTS idx_letter_item_req        ON letter_item (request_id);
 
 -- =========================
--- Letter Notification Log
+-- Letter Attempt (H2)
+-- =========================
+CREATE TABLE IF NOT EXISTS letter_attempt (
+    id            UUID,
+    request_id    UUID NOT NULL,
+    item_id       UUID,
+    attempt_no    SMALLINT NOT NULL,
+    started_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at   TIMESTAMP,
+    duration_ms   INTEGER,
+    result        VARCHAR(20) NOT NULL, -- SUCCESS / FAIL
+    error_code    VARCHAR(64),
+    error_message TEXT,
+    PRIMARY KEY (id, started_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_letter_attempt_req  ON letter_attempt (request_id);
+CREATE INDEX IF NOT EXISTS idx_letter_attempt_item ON letter_attempt (item_id);
+
+-- =========================
+-- Letter Notification Log (H2)
 -- =========================
 CREATE TABLE IF NOT EXISTS letter_notification_log (
-                                                       id UUID PRIMARY KEY,
-                                                       request_id VARCHAR(64),
-                                                       sent_at TIMESTAMP NOT NULL,
-                                                       recipient_email VARCHAR(255) NOT NULL,
-                                                       status TEXT,
-                                                       subject TEXT,
-                                                       error_message TEXT
+    id UUID PRIMARY KEY,
+    request_id VARCHAR(64),
+    sent_at TIMESTAMP NOT NULL,
+    recipient_email VARCHAR(255) NOT NULL,
+    status TEXT,
+    subject TEXT,
+    error_message TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_letter_notification_log_req_sent
-    ON letter_notification_log(request_id, sent_at);
-
-
+    ON letter_notification_log (request_id, sent_at);
 
 -- =========================
--- Seed Data (Optional)
+-- Seed Data (idempotent MERGE)
 -- =========================
-INSERT INTO ref_letter_request_type (id, name) VALUES
-                                                   (1, 'ODEME'),
-                                                   (2, 'HAKEDIS_DEVIR'),
-                                                   (3, 'DAVET');
+MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (1, 'ODEME');
+MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (2, 'HAKEDIS_DEVIR');
+MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (3, 'DAVET');
 
+MERGE INTO ref_letter_scope (id, name) KEY(id) VALUES (1, 'BULK');
+MERGE INTO ref_letter_scope (id, name) KEY(id) VALUES (2, 'SINGLE');
 
-INSERT INTO ref_letter_scope (id, name) VALUES
-                                            (1, 'BULK'),
-                                            (2, 'SINGLE');
-
-
-INSERT INTO ref_letter_status (id, name) VALUES
-                                             (1, 'PENDING'),
-                                             (2, 'VALIDATION_FAIL'),
-                                             (3, 'READY'),
-                                             (4, 'PROCESSING'),
-                                             (5, 'PARTIAL_SENT'),
-                                             (6, 'SENT'),
-                                             (7, 'FAILED'),
-                                             (8, 'CANCELLED');
-
-
-
-
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (1, 'PENDING');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (2, 'VALIDATION_FAIL');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (3, 'READY');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (4, 'PROCESSING');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (5, 'PARTIAL_SENT');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (6, 'SENT');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (7, 'FAILED');
+MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (8, 'CANCELLED');
 
 
 
