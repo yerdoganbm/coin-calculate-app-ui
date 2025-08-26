@@ -1,4 +1,263 @@
+project.name=OGMDFIFSE
+spring.application.name=ogmdfifse
+spring.banner.location=classpath:/static/banner.txt
 
+server.servlet.encoding.enabled=true
+server.servlet.encoding.force=true
+server.servlet.encoding.charset=UTF-8
+server.max-http-header-size=32KB
+server.port=8080
+server.shutdown=graceful
+
+management.endpoints.enabled-by-default=false
+management.endpoint.info.enabled=true
+management.endpoint.health.enabled=true
+management.endpoint.health.probes.enabled=true
+management.endpoint.health.group.readiness.include=readinessState,db,rabbit,mongo
+management.endpoint.health.show-details=always
+management.endpoint.health.show-components=always
+
+info.app.name=@project.name@
+info.app.version=@project.version@
+info.app.groupId=@project.groupId@
+info.app.artifactId=@project.artifactId@
+info.app.encoding=@project.build.sourceEncoding@
+info.app.java.version=@java.version@
+
+spring.jpa.database=POSTGRESQL
+#spring.datasource.driver-class-name=org.postgresql.Driver
+#spring.datasource.initialization-mode=never
+#spring.datasource.platform=postgres
+spring.config.import=platform-log.properties,optional:file:/vault/secrets/postgresql.properties,optional:file:/vault/secrets/apigw.properties,optional:file:/vault/secrets/custom.properties
+
+# loglar localde anla??l?r olsun diye
+#logging.pattern.console=${CONSOLE_LOG_PATTERN:-%clr(%d{${LOG_DATEFORMAT_PATTERN:-yyyy-MM-dd HH:mm:ss.SSS}}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}}
+
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+spring.jpa.properties.hibernate.format_sql=true
+#spring.datasource.type=com.zaxxer.hikari.HikariDataSource
+#spring.datasource.hikari.maximum-pool-size=2
+#spring.datasource.url=jdbc:postgresql://${postgresql1}/ogmdfif?ssl=false&sslmode=disable
+spring.lifecycle.timeout-per-shutdown-phase=20s
+spring.jpa.properties.hibernate.ejb.interceptor=tr.gov.tcmb.ogmdfif.interceptor.AuditInterceptor
+
+#spring.datasource.hikari.max-lifetime=590000
+
+uygulama.tb.endpoint=${uygulamaTbEndpoint}
+uygulama.tb.user=${uygulamaTbUser}
+
+# teste kurulurken false yap
+uygulama.ortam.isLocal=false
+
+spring.jpa.properties.hibernate.default_schema=OGMDFIFODM
+
+
+#################################################################################################
+#																								#
+#	container ortaminda -Dspring.profiles.active ile imaj run edilecek, test edilmek istenirse	#
+#	spring.profiles.active=TCMB.TEST															#
+#																								#
+#################################################################################################
+
+#####################
+#					#
+#	test amacli		#
+#					#
+#####################
+tcmb.ortam=default
+tcmb.random.int=${random.int}
+
+#################
+#				#
+#	endpoint	#
+#				#
+#################
+# belki de bunu vermeyecegiz
+
+#################
+#				#
+#	logging		#
+#				#
+#################
+# LOGLAR SYSOUT'A YAZILACAK
+# tcmb.log.file.name=/applog/ogmdfif.log
+# log config logback-spring.xml ile yapiliyor, localde CONSOLE, diger ortamlarda FILE appender kullaniliyor
+# dolayisiyla application-{profile}.properties dosyalarinda logging.file.name ={tcmb.log.file.name} olarak veriliyor
+# org/springframework/boot/logging/logback/file-appender.xml daki default degerler kullaniliyor
+# LOG_FILE_MAX_SIZE = 10MB , LOG_FILE_MAX_HISTORY = 7 gun vs
+# bu degerler application.properties dosyasinda yada logback-spring.xml de degistirilebilir
+# <property name="LOG_FILE_MAX_SIZE" value="5MB"/> gibi
+
+#################
+#				#
+#	multipart	#
+#				#
+#################
+spring.servlet.multipart.max-file-size=5MB
+spring.servlet.multipart.max-request-size=5MB
+
+#####################################
+#									#
+#	veri tabani ve connection pool	#
+#									#
+#####################################
+#spring.datasource.jdbc-url=jdbc:postgresql://${postgresql1}/ogmdfif?ssl=false&sslmode=disable
+#spring.jpa.show-sql=true
+#spring.jpa.properties.hibernate.format_sql=true
+# default olarak view rendering esnasinda query perform edilir, view layerinda sessionin acik kalmasi gerekiyorsa silinmeleli/true olmali
+spring.jpa.open-in-view=false
+#connection pool spring boot 2 ile beraber default olarak HIKARICP , https://github.com/brettwooldridge/HikariCP#configuration-knobs-baby
+#logging.level.com.zaxxer.hikari.HikariConfig=DEBUG
+#spring.datasource.hikari.pool-name=cp-OGMDFIF
+
+ssl.trust-store=certificate/cacerts
+ssl.trust-store-password=changeit
+
+ssl.key-store=src/main/resources/certificate/client-keystore.jks
+ssl.key-store-password=changeit
+
+eft.girilenKasMesajBySorguNo.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/getGirilenKasMesajBySorguNo/
+eft.posDurum.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/pos-durum/
+eft.mesajSorguNo.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/sorgu-numarasi/
+eft.mesaj.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/
+eft.xsdDogrula.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/util/xsdDogrula/
+eft.hataliMesajList.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/getHataliMesajList/
+eft.hataliMesajDurumuGuncelle.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/hataliMesajDurumuGuncelle/
+eft.mesajGidecek.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/gidecek/
+eft.gunlukKasMesajlar.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/getGunlukKasMesajlar/
+
+muhasebe.servis.pathprefix=/submuhbms-muhmfis/
+muhasebeHesap.servis.pathprefix=/submuhbms-muhmfis/query/hesap/
+muhasebeServis.servis.pathprefix=/submuhbms-muhmfis/public/servis/
+muhasebeParaBirimi.servis.pathprefix=/submuhbms-muhmfis/public/para-birimi/
+
+banka.servis.pathprefix=/MBNBAYUSE/public/api/banks/
+
+dfif.ops.scheduling.enable=true
+
+shedlock.emir-isletim-job.lock-at-most=PT10m
+shedlock.emir-isletim-job.lock-at-least=PT1m
+
+shedlock.sgk-borc-eft-islemleri-yap-job.lock-at-most=PT10m
+shedlock.sgk-borc-eft-islemleri-yap-job.lock-at-least=PT1m
+
+shedlock.emir-gun-sonu-iptal-islemleri-job.lock-at-most=PT10m
+shedlock.emir-gun-sonu-iptal-islemleri-job.lock-at-least=PT1m
+
+shedlock.ortak-borc-job.lock-at-most=PT10m
+shedlock.ortak-borc-job.lock-at-least=PT1m
+
+shedlock.anlik-borc-job.lock-at-most=PT10m
+shedlock.anlik-borc-job.lock-at-least=PT1m
+
+shedlock.sgk-job.lock-at-most=PT2m
+shedlock.sgk-job.lock-at-least=PT1m
+
+shedlock.gib-job.lock-at-most=PT3m
+shedlock.gib-job.lock-at-least=PT2m
+
+shedlock.hatali-eft-kontrol-job.lock-at-most=PT4m
+shedlock.hatali-eft-kontrol-job.lock-at-least=PT3m
+
+shedlock.provizyon-odeme-geri-al-job.lock-at-most=PT10m
+shedlock.provizyon-odeme-geri-al-job.lock-at-least=PT1m
+
+sgk.webservis.kurumKodu=${sgkWebservisKurumKodu}
+sgk.webservis.username=${sgkWebservisUsername}
+
+sgk.servis.scheme=${sgkServisScheme}
+sgk.servis.host=${sgkServisHost}
+
+ziraatBankasiScheme=${ziraatBankasiScheme}
+ziraatBankasiHost=${ziraatBankasiHost}
+#ziraatBankasiSifre=${ziraatBankasiSifre}
+ziraat.oauth2.tokenUrl=${ziraat.oauth2.tokenUrl}
+ziraat.oauth2.clientId=${ziraat.oauth2.clientId}
+#ziraat.oauth2.clientSecret=${ziraat.oauth2.clientSecret}
+ziraat.oauth2.username=${ziraat.oauth2.username}
+#ziraat.oauth2.password=${ziraat.oauth2.password}
+ziraat.oauth2.scope=${ziraat.oauth2.scope}
+
+spring.codec.max-in-memory-size=100MB
+
+gibUrl=${gibUrl}
+uygulama_muhmfis_endpoint=${uygulama_muhmfis_endpoint}
+uygulama_mgmmubs_endpoint=${uygulama_mgmmubs_endpoint}
+uygulama_eft_endpoint=${uygulama_eft_endpoint}
+uygulama_email_endpoint=${uygulama_email_endpoint}
+uygulama_saos_endpoint=${uygulama_saos_endpoint}
+uygulama_ortak_muhasebe_init_endpoint=${uygulama_ortak_muhasebe_init_endpoint}
+uygulama_ortak_muhasebe_admin_endpoint=${uygulama_ortak_muhasebe_admin_endpoint}
+uygulama_mbnayuse_endpoint=${uygulama_mbnayuse_endpoint}
+kurServisScheme=${kurServisScheme}
+kurServisHost=${kurServisHost}
+kurServisPathprefix=${kurServisPathprefix}
+epostaServisScheme=${epostaServisScheme}
+epostaServisHost=${epostaServisHost}
+epostaServisPathprefix=${epostaServisPathprefix}
+muhasebeServisScheme=${muhasebeServisScheme}
+muhasebeServisHost=${muhasebeServisHost}
+muhasebeServisPathprefix=${muhasebeServisPathprefix}
+eftServisScheme=${eftServisScheme}
+eftServisHost=${eftServisHost}
+bankaServisScheme=${bankaServisScheme}
+bankaServisHost=${bankaServisHost}
+uygulama_bfrortmmsMuhasebe_endpoint=${uygulama_bfrortmmsMuhasebe_endpoint}
+muhasebe.servis.scheme=${muhasebe.servis.scheme}
+muhasebe.servis.host=${muhasebe.servis.host}
+banka.servis.scheme=${banka.servis.scheme}
+banka.servis.host=${banka.servis.host}
+eft.servis.scheme=${eft.servis.scheme}
+eft.servis.host=${eft.servis.host}
+
+uygulama_ortak_muhasebe_scheme=${uygulama_ortak_muhasebe_scheme}
+uygulama_ortak_muhasebe_host=${uygulama_ortak_muhasebe_host}
+
+eposta.servis.scheme=${epostaServisScheme}
+eposta.servis.host=${epostaServisHost}
+eposta.servis.pathprefix=${epostaServisPathprefix}
+
+kur.servis.scheme=${kurServisScheme}
+kur.servis.host=${kurServisHost}
+kur.servis.pathprefix=${kurServisPathprefix}
+
+
+#25.08.2025 todo include yap?ya ta??nacakt?r
+# Thread pool ayarlar?
+letterreq.executor.core-pool-size=5
+letterreq.executor.max-pool-size=5
+letterreq.executor.queue-capacity=150
+letterreq.executor.thread-name-prefix=letter-req-
+
+# Timeout ayarlar? (ms cinsinden)
+letterreq.per-task-timeout-ms=4000
+letterreq.global-timeout-ms=15000
+
+spring.jpa.properties.hibernate.jdbc.batch_size=100
+spring.jpa.properties.hibernate.order_inserts=true
+spring.jpa.properties.hibernate.order_updates=true
+spring.jpa.properties.hibernate.generate_statistics=false
+
+ogmdfif.datasource.driver-class-name=org.postgresql.Driver
+ogmdfif.datasource.jdbcUrl=jdbc:postgresql://${postgresql1}/ogmdfif?ssl=false&sslmode=disable
+ogmdfif.datasource.hikari.pool-name=cp-OGMDFIF
+ogmdfif.datasource.hikari.minimum-idle=2
+ogmdfif.datasource.hikari.maximum-pool-size=20
+ogmdfif.datasource.hikari.max-lifetime=550000
+ogmdfif.datasource.hikari.idle-timeout=500000
+ogmdfif.datasource.hikari.leak-detection-threshold=30000
+ogmdfif.hibernate.default_schema=ogmdfif
+ogmdfif.hibernate.show_sql=true
+ogmdfif.hibernate.format_sql=true
+ogmdfif.hibernate.hbm2ddl.auto=none
+
+
+logging.level.com.zaxxer.hikari=TRACE
+management.info.env.enabled=true
+
+
+
+///////////////
 
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
