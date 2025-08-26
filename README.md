@@ -1,3 +1,73 @@
+java.lang.IllegalStateException: Failed to load ApplicationContext
+
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContext(DefaultCacheAwareContextLoaderDelegate.java:132)
+	at org.springframework.test.context.support.DefaultTestContext.getApplicationContext(DefaultTestContext.java:124)
+	at org.springframework.test.context.web.ServletTestExecutionListener.setUpRequestContextIfNecessary(ServletTestExecutionListener.java:190)
+	at org.springframework.test.context.web.ServletTestExecutionListener.prepareTestInstance(ServletTestExecutionListener.java:132)
+	at org.springframework.test.context.TestContextManager.prepareTestInstance(TestContextManager.java:244)
+	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.createTest(SpringJUnit4ClassRunner.java:227)
+	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner$1.runReflectiveCall(SpringJUnit4ClassRunner.java:289)
+	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.methodBlock(SpringJUnit4ClassRunner.java:291)
+	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.runChild(SpringJUnit4ClassRunner.java:246)
+	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.runChild(SpringJUnit4ClassRunner.java:97)
+	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
+	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
+	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
+	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
+	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
+	at org.springframework.test.context.junit4.statements.RunBeforeTestClassCallbacks.evaluate(RunBeforeTestClassCallbacks.java:61)
+	at org.springframework.test.context.junit4.statements.RunAfterTestClassCallbacks.evaluate(RunAfterTestClassCallbacks.java:70)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
+	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.run(SpringJUnit4ClassRunner.java:190)
+	at org.junit.runners.Suite.runChild(Suite.java:128)
+	at org.junit.runners.Suite.runChild(Suite.java:27)
+	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
+	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
+	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
+	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
+	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
+	at org.junit.runner.JUnitCore.run(JUnitCore.java:137)
+	at com.intellij.junit4.JUnit4IdeaTestRunner.startRunnerWithArgs(JUnit4IdeaTestRunner.java:69)
+	at com.intellij.rt.junit.IdeaTestRunner$Repeater$1.execute(IdeaTestRunner.java:38)
+	at com.intellij.rt.execution.junit.TestsRepeater.repeat(TestsRepeater.java:11)
+	at com.intellij.rt.junit.IdeaTestRunner$Repeater.startRunnerWithArgs(IdeaTestRunner.java:35)
+	at com.intellij.rt.junit.JUnitStarter.prepareStreamsAndStart(JUnitStarter.java:232)
+	at com.intellij.rt.junit.JUnitStarter.main(JUnitStarter.java:55)
+Caused by: org.springframework.beans.factory.UnsatisfiedDependencyException: Error creating bean with name 'ogmdfifEntityManagerFactory' defined in class path resource [tr/gov/tcmb/ogmdfif/config/DatabaseConfig.class]: Unsatisfied dependency expressed through method 'ogmdfifdEntityManagerFactory' parameter 0; nested exception is org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'ogmdfifDataSource' defined in class path resource [tr/gov/tcmb/ogmdfif/config/DatabaseConfig.class]: Initialization of bean failed; nested exception is org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'org.springframework.boot.autoconfigure.jdbc.DataSourceInitializerInvoker': Invocation of init method failed; nested exception is org.springframework.jdbc.datasource.init.ScriptStatementFailedException: Failed to execute SQL script statement #4 of URL [file:/C:/Users/k017253/IdeaProjects/2025/ogmdfifse/target/classes/schema.sql]: CREATE TABLE IF NOT EXISTS letter_request ( id UUID, request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id), scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id), scope_value VARCHAR(20), first_payment_date DATE NOT NULL, last_payment_date DATE NOT NULL, tahakkuk_turu VARCHAR(50), belge_no VARCHAR(50), yil INTEGER, karar_no_adi VARCHAR(200), firma_vkn VARCHAR(20), uretici_tckn VARCHAR(20), status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id), created_by VARCHAR(64) NOT NULL, branch_id VARCHAR(32) NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL, updater VARCHAR(64), attempt_count SMALLINT NOT NULL DEFAULT 0, last_attempt_at TIMESTAMP, next_attempt_at TIMESTAMP, processing_started_at TIMESTAMP, processing_finished_at TIMESTAMP, processing_duration_ms INTEGER, last_error_code VARCHAR(64), last_error_message TEXT, notify_emails TEXT, notify_sent BOOLEAN NOT NULL DEFAULT FALSE, notify_sent_at TIMESTAMP, notify_to_list TEXT, primary key (id,created_at) ) partition by RANGE (created_at); nested exception is org.h2.jdbc.JdbcSQLSyntaxErrorException: Syntax error in SQL statement "create table if not exists letter_request ( id uuid, request_type_id smallint not null references ref_letter_request_type(id), scope_id smallint not null references ref_letter_scope(id), scope_value varchar(20), first_payment_date date not null, last_payment_date date not null, tahakkuk_turu varchar(50), belge_no varchar(50), yil integer, karar_no_adi varchar(200), firma_vkn varchar(20), uretici_tckn varchar(20), status_id smallint not null references ref_letter_status(id), created_by varchar(64) not null, branch_id varchar(32) not null, created_at timestamp not null, updated_at timestamp not null, updater varchar(64), attempt_count smallint not null default 0, last_attempt_at timestamp, next_attempt_at timestamp, processing_started_at timestamp, processing_finished_at timestamp, processing_duration_ms integer, last_error_code varchar(64), last_error_message text, notify_emails text, notify_sent boolean not null default false, notify_sent_at timestamp, notify_to_list text, primary key (id,created_at) ) partition[*] by range (created_at)"; SQL statement:
+CREATE TABLE IF NOT EXISTS letter_request ( id UUID, request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id), scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id), scope_value VARCHAR(20), first_payment_date DATE NOT NULL, last_payment_date DATE NOT NULL, tahakkuk_turu VARCHAR(50), belge_no VARCHAR(50), yil INTEGER, karar_no_adi VARCHAR(200), firma_vkn VARCHAR(20), uretici_tckn VARCHAR(20), status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id), created_by VARCHAR(64) NOT NULL, branch_id VARCHAR(32) NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL, updater VARCHAR(64), attempt_count SMALLINT NOT NULL DEFAULT 0, last_attempt_at TIMESTAMP, next_attempt_at TIMESTAMP, processing_started_at TIMESTAMP, processing_finished_at TIMESTAMP, processing_duration_ms INTEGER, last_error_code VARCHAR(64), last_error_message TEXT, notify_emails TEXT, notify_sent BOOLEAN NOT NULL DEFAULT FALSE, notify_sent_at TIMESTAMP, notify_to_list TEXT, primary key (id,created_at) ) partition by RANGE (created_at) [42000-200]
+	at org.springframework.beans.factory.support.ConstructorResolver.createArgumentArray(ConstructorResolver.java:800)
+
+
+
+@Primary
+    @Bean(name = "ogmdfifEntityManagerFactory")
+    public LocalContainerEntityManagerFactoryBean ogmdfifdEntityManagerFactory(
+            @Qualifier("ogmdfifDataSource") DataSource ogmdfifDataSource) {
+
+        LocalContainerEntityManagerFactoryBean emFactoryBean = new LocalContainerEntityManagerFactoryBean();
+
+        emFactoryBean.setDataSource(ogmdfifDataSource);
+        emFactoryBean.setPersistenceUnitName("ogmdfif-PU");
+        emFactoryBean.setPersistenceProviderClass(HibernatePersistenceProvider.class);
+        emFactoryBean.setPackagesToScan(
+                "tr.gov.tcmb.ogmdfif.model.entity",
+                "tr.gov.tcmb.ogmdfif.model", "tr.gov.tcmb.auditing.model"
+        );
+        emFactoryBean.setJpaVendorAdapter(new HibernateJpaVendorAdapter());
+        emFactoryBean.setJpaProperties(getJpaProperties());
+
+        return emFactoryBean;
+    }
+
+
+
+
+/////
+
 project.name=OGMDFIFSE
 spring.application.name=ogmdfifse
 spring.banner.location=classpath:/static/banner.txt
