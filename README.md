@@ -1,3 +1,10 @@
+
+@ExtendWith(MockitoExtension.class)
+@RunWith(SpringRunner.class)
+@SpringBootTest
+@AutoConfigureMockMvc
+@ComponentScan(value = "tr.gov.tcmb.ogmdfif")
+
 package tr.gov.tcmb.ogmdfif.service.impl;
 
 import org.apache.commons.lang3.StringUtils;
