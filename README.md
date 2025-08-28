@@ -1,2007 +1,1192 @@
--- =========================
--- Lookup Tables (H2)
--- =========================
-CREATE TABLE IF NOT EXISTS ref_letter_request_type (
-    id SMALLINT PRIMARY KEY,
-    name VARCHAR(50) NOT NULL UNIQUE
-);
+package tr.gov.tcmb.ogmdfif.service.impl;
 
-CREATE TABLE IF NOT EXISTS ref_letter_scope (
-    id SMALLINT PRIMARY KEY,
-    name VARCHAR(50) NOT NULL UNIQUE
-);
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.log.logger.PlatformLogger;
+import tr.gov.tcmb.log.logger.PlatformLoggerFactory;
+import tr.gov.tcmb.ogmdfif.constant.*;
+import tr.gov.tcmb.ogmdfif.exception.ValidationException;
+import tr.gov.tcmb.ogmdfif.model.dto.EftSube;
+import tr.gov.tcmb.ogmdfif.model.dto.KararDTO;
+import tr.gov.tcmb.ogmdfif.model.dto.SgkBorcTahsilat;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.service.*;
+import tr.gov.tcmb.ogmdfif.util.Constants;
+import tr.gov.tcmb.ogmdfif.ws.client.MuhasebeClientService;
+import tr.gov.tcmb.ogmdfif.ws.client.SgkClientService;
+import tr.gov.tcmb.ogmdfif.ws.response.SgkResponse;
+import tr.gov.tcmb.ogmdfif.ws.response.SgkTahsilatKaydetResult;
 
-CREATE TABLE IF NOT EXISTS ref_letter_status (
-    id SMALLINT PRIMARY KEY,
-    name VARCHAR(50) NOT NULL UNIQUE
-);
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
+import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
+import java.util.stream.Collectors;
 
--- =========================
--- Main Tables (H2)
--- =========================
-CREATE TABLE IF NOT EXISTS letter_request (
-    id UUID,
-    request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id),
-    scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id),
-    scope_value VARCHAR(20),
-    first_payment_date DATE NOT NULL,
-    last_payment_date DATE NOT NULL,
-    tahakkuk_turu VARCHAR(50),
-    belge_no VARCHAR(50),
-    yil INTEGER,
-    karar_no_adi VARCHAR(200),
-    firma_vkn VARCHAR(20),
-    uretici_tckn VARCHAR(20),
-    status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id),
-    created_by VARCHAR(64) NOT NULL,
-    branch_id VARCHAR(32) NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    updater VARCHAR(64),
-    attempt_count SMALLINT NOT NULL DEFAULT 0,
-    last_attempt_at TIMESTAMP,
-    next_attempt_at TIMESTAMP,
-    processing_started_at TIMESTAMP,
-    processing_finished_at TIMESTAMP,
-    processing_duration_ms INTEGER,
-    last_error_code VARCHAR(64),
-    last_error_message TEXT,
-    notify_emails TEXT,
-    notify_sent BOOLEAN NOT NULL DEFAULT FALSE,
-    notify_sent_at TIMESTAMP,
-    notify_to_list TEXT,
-    PRIMARY KEY (id, created_at)
-);
+@Service("borcIslemleriService")
+@Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = {Exception.class})
+public class BorcIslemleriServiceImpl implements BorcIslemleriService {
+    private static final PlatformLogger logger = PlatformLoggerFactory.getLogger(BorcIslemleriServiceImpl.class);
 
--- =========================
--- Letter Item (H2)
--- =========================
-CREATE TABLE IF NOT EXISTS letter_item (
-    id                 UUID,
-    request_id         UUID NOT NULL,
-    receiver_key       VARCHAR(64) NOT NULL,
-    payload_ref        VARCHAR(200),
-    status_id          SMALLINT NOT NULL REFERENCES ref_letter_status(id),
-    attempt_count      SMALLINT NOT NULL DEFAULT 0,
-    last_error_code    VARCHAR(64),
-    last_error_message TEXT,
-    sent_at            TIMESTAMP,
-    created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id, created_at)
-);
+    @Autowired
+    protected SorgulananBorcBilgiService sorgulananBorcBilgiService;
+    @Autowired
+    protected SorgulananBorcBilgiTahakkukService sorgulananBorcBilgiTahakkukService;
+    @Autowired
+    protected ProvizyonTalepService provizyonTalepService;
+    @Autowired
+    protected ProvizyonIslemleriService provizyonIslemleriService;
+    @Autowired
+    protected BorcBilgiService borcBilgisiService;
+    @Autowired
+    protected TahakkukIslemleriService tahakkukIslemleriService;
+    @Autowired
+    protected BankaSubeService bankaSubeService;
+    @Autowired
+    protected AnlikBorcService anlikBorcService;
+    @Autowired
+    protected MailService mailService;
+    @Autowired
+    protected MuhasebeClientService muhasebeClientService;
+    @Autowired
+    protected GibBorcSorguService gibBorcSorguService;
+    @Autowired
+    protected KararIslemleriService kararIslemleriService;
+    @Autowired
+    private SgkClientService sgkClientService;
 
-CREATE INDEX IF NOT EXISTS idx_letter_item_req_status ON letter_item (request_id, status_id);
-CREATE INDEX IF NOT EXISTS idx_letter_item_req        ON letter_item (request_id);
+    public static DecimalFormat df = new DecimalFormat("#,##0.00", new DecimalFormatSymbols(Locale.ITALIAN));
 
--- =========================
--- Letter Attempt (H2)
--- =========================
-CREATE TABLE IF NOT EXISTS letter_attempt (
-    id            UUID,
-    request_id    UUID NOT NULL,
-    item_id       UUID,
-    attempt_no    SMALLINT NOT NULL,
-    started_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    finished_at   TIMESTAMP,
-    duration_ms   INTEGER,
-    result        VARCHAR(20) NOT NULL, -- SUCCESS / FAIL
-    error_code    VARCHAR(64),
-    error_message TEXT,
-    PRIMARY KEY (id, started_at)
-);
+    private static BigDecimal toplamSgkTahsilatTutarim = BigDecimal.ZERO;
+    private static BigDecimal toplamGibTahsilatTutarim = BigDecimal.ZERO;
 
-CREATE INDEX IF NOT EXISTS idx_letter_attempt_req  ON letter_attempt (request_id);
-CREATE INDEX IF NOT EXISTS idx_letter_attempt_item ON letter_attempt (item_id);
+    public static final BigDecimal ONE_HUNDRED = new BigDecimal(100);
 
--- =========================
--- Letter Notification Log (H2)
--- =========================
-CREATE TABLE IF NOT EXISTS letter_notification_log (
-    id UUID PRIMARY KEY,
-    request_id VARCHAR(64),
-    sent_at TIMESTAMP NOT NULL,
-    recipient_email VARCHAR(255) NOT NULL,
-    status TEXT,
-    subject TEXT,
-    error_message TEXT
-);
+    private static Set<Long> bugunkuTumTahakkukIdSet = new HashSet<>();
+    private static Set<Long> kontrolEdilmisOdenebilirTahakkukIdSet = new HashSet<>();
+    private static Set<Long> kontrolEdilmisOdenemezTahakkukIdSet = new HashSet<>();
 
-CREATE INDEX IF NOT EXISTS idx_letter_notification_log_req_sent
-    ON letter_notification_log (request_id, sent_at);
+    @Scheduled(cron = "0 0 9-12 * * MON-FRI")
+    // Shedlock olMAyacak!
+    public void staticleriSifirla() {
+        logger.info("BorcIslemleriServiceImpl","staticleriSifirla");
+        bugunkuTumTahakkukIdSet.clear();
+        kontrolEdilmisOdenebilirTahakkukIdSet.clear();
+        kontrolEdilmisOdenemezTahakkukIdSet.clear();
+        toplamGibTahsilatTutarim = BigDecimal.ZERO;
+        toplamSgkTahsilatTutarim = BigDecimal.ZERO;
+    }
 
--- =========================
--- Seed Data (idempotent MERGE)
--- =========================
-MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (1, 'ODEME');
-MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (2, 'HAKEDIS_DEVIR');
-MERGE INTO ref_letter_request_type (id, name) KEY(id) VALUES (3, 'DAVET');
+    @Override
+    public void borclariHakediseGoreDagit() throws Exception {
+        // Borçları dağıtırken bir ihracatçı için belirlenecek toplam hakediş, bütün ihracatçılarının borç bilgisi belli
+        // olan tahakkuklardaki ilgili ihracaçı için hakedişlerin toplanmasıyla elde edilir.
+        Date bugun = new Date();
+        List<SorgulananBorcBilgi> sorgulananBorcBilgiList = sorgulananBorcBilgiService
+                .getSorgulananBorcBilgiListByDurum(bugun, SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR, 0);
+        List<SorgulananBorcBilgi> borclarHakediseGoreDagitilmamisOlanlar = sorgulananBorcBilgiList.stream().
+                filter(sorgulananBorcBilgi -> (!sorgulananBorcBilgi.getBorclarHakediseGoreDagitildi())).limit(200).collect(Collectors.toList());
+        Set<Long> kontrolEdilmisOdenebilirDurumdakiTahakkukSet = new HashSet<>();
+        Set<Long> kontrolEdilmisOdenemezDurumdakiTahakkukSet = new HashSet<>();
+        for (SorgulananBorcBilgi sorgulananBorcBilgi : borclarHakediseGoreDagitilmamisOlanlar) {
+            try {
+                logger.info("BorcIslemleriServiceImpl","Islenen SBB ID: " + sorgulananBorcBilgi.getId());
+                //Alt satırda amaç bir ihracatçının o günkü farklı farklı tahakkuklardaki toplam hakediş miktarının belirlenmesi.
+                //SorgulananBorcBilgiTahakkuk tablosu borcu sorgulananan ilgili ihracatçının hakedişlerinin hangi tahakkuklarda olduğunu tutar.
+                List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(sorgulananBorcBilgi.getId());
+                List<Long> tahakkukIdList = getOdenmemisTahakkukIdList(sorgulananBorcBilgiTahakkukList);
+                List<Long> odenebilirTahakkukIdList = new ArrayList<>();
+                for(Long tahakkukId : tahakkukIdList) {
+                    if(kontrolEdilmisOdenebilirDurumdakiTahakkukSet.contains(tahakkukId)) {
+                        // Kontrol edilmiş ve ödenebilir durumda olduğu için odenebilirTahakkukIdList'e ekleniyor
+                        odenebilirTahakkukIdList.add(tahakkukId);
+                    } else if(!kontrolEdilmisOdenemezDurumdakiTahakkukSet.contains(tahakkukId)) {
+                        List<Long> kontrolSonucu = filterOdenebilirDurumdakiTahakkukList(tahakkukId);
+                        // Buradaki kontrol sonucuna göre ödenmiş veya ödenemez durumdaki setlere ekleniyor.
+                        if(kontrolSonucu.isEmpty()) {
+                            kontrolEdilmisOdenemezDurumdakiTahakkukSet.add(tahakkukId);
+                        } else {
+                            kontrolEdilmisOdenebilirDurumdakiTahakkukSet.add(tahakkukId);
+                            //  Eğer ödenebilir durumdaysa ayrıca odenebilirTahakkukIdList'e ekleniyor
+                            odenebilirTahakkukIdList.add(tahakkukId);
+                        }
+                    }
+                }
+                List<Provizyon> provizyonList = provizyonIslemleriService.getProvizyonList(odenebilirTahakkukIdList, sorgulananBorcBilgi.getVkn(), sorgulananBorcBilgi.getTckn());
+                // *** Hakedişleri büyükten küçüğe göre sıralamanın getirisi, daha az borç eft'si göndermiş.
+                // Yani borçlerı olabildiğince çok sayıda eft'ye bölmeden mümkünse tek parça halinde gönderebilmek.
+                // SGK borçları zaten bütün ihracatçılar için, her ihracatçının borcunun toplamını içerecek şekilde
+                // tek bir eft gönderilmesi suretiyle gerçekleştirilir. O halde borçları provizyonlarla eşleştirirken
+                // SGK borçlarından ziyade GİB borçlarına dikkate alırsak, GİB için daha az eft göndermiş oluruz.
+                provizyonListesiniMiktaraGoreBuyuktenKucugeSirala(provizyonList);
 
-MERGE INTO ref_letter_scope (id, name) KEY(id) VALUES (1, 'BULK');
-MERGE INTO ref_letter_scope (id, name) KEY(id) VALUES (2, 'SINGLE');
+                BigDecimal toplamSgkBorcu = sorgulananBorcBilgi.getToplamSgkBorcu();
+                BigDecimal toplamGibBorcu = sorgulananBorcBilgi.getToplamGibBorcu();
 
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (1, 'PENDING');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (2, 'VALIDATION_FAIL');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (3, 'READY');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (4, 'PROCESSING');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (5, 'PARTIAL_SENT');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (6, 'SENT');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (7, 'FAILED');
-MERGE INTO ref_letter_status (id, name) KEY(id) VALUES (8, 'CANCELLED');
+                BigDecimal anlikTaraftanOdenecekGibBorcu = BigDecimal.ZERO;
+                BigDecimal anlikTaraftanOdenecekSgkBorcu = BigDecimal.ZERO;
+                List<AnlikBorc> anlikBorcList = anlikBorcService.getAnlikBorcList(bugun, sorgulananBorcBilgi.getTckn(), sorgulananBorcBilgi.getVkn());
+                for (AnlikBorc anlikBorc : anlikBorcList) {
+                    if(anlikBorc.getIslemDurum().equals(AnlikBorcDurumEnum.TAHSILAT_BEKLIYOR.getKod())) {
+                        if(anlikBorc.getBorcTip().equals(BorcTipEnum.SGK.getKod())){
+                            anlikTaraftanOdenecekSgkBorcu = anlikBorc.getOdenecekTutar();
+                        }else if(anlikBorc.getBorcTip().equals(BorcTipEnum.GIB.getKod())){
+                            anlikTaraftanOdenecekGibBorcu = anlikBorc.getOdenecekTutar();
+                        }
+                    }
+                }
+                BigDecimal odenecekSgkBorcuForProvizyonList = toplamSgkBorcu.subtract(anlikTaraftanOdenecekSgkBorcu);
+                BigDecimal odenecekGibBorcuForProvizyonList = toplamGibBorcu.subtract(anlikTaraftanOdenecekGibBorcu);
+                BigDecimal toplamBorc = odenecekGibBorcuForProvizyonList.add(odenecekSgkBorcuForProvizyonList);
+                logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId() + " odenecekSgkBorcuForProvizyonList: " + odenecekSgkBorcuForProvizyonList.toPlainString()
+                        + " odenecekGibBorcuForProvizyonList: " + odenecekGibBorcuForProvizyonList.toPlainString() + " toplamBorc: " + toplamBorc.toPlainString());
+                if(toplamBorc.compareTo(BigDecimal.ZERO) <= 0){
+                    sorgulananBorcBilgi.setOdenecekSgkBorcu(odenecekSgkBorcuForProvizyonList);
+                    sorgulananBorcBilgi.setOdenecekGibBorcu(odenecekGibBorcuForProvizyonList);
+                    sorgulananBorcBilgi.setBorclarHakediseGoreDagitildi(true);
+                    sorgulananBorcBilgiService.kaydet(sorgulananBorcBilgi);
+                    continue;
+                }
+                BigDecimal odenecekToplamBorcForProvizyonList;
+                if(!provizyonList.isEmpty()){
+                    boolean isMahsupTahakkukuVar = isMahsupTahakkukuVar(sorgulananBorcBilgiTahakkukList);
+                    logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId() + " isMahsupTahakkukuVar: " + isMahsupTahakkukuVar);
+                    BigDecimal provizyonListesindekiToplamHakedis = getToplamTutarInProvizyonListesi(provizyonList);
+                    logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId() + " provizyonListesindekiToplamHakedis: " + provizyonListesindekiToplamHakedis.toPlainString());
+                    // Yukarda *** ile anlatılan yerdeki hususun gerçekleşmesi için öncelikli olarak GİB'in borçları en
+                    // yüksek hakdeşli provizyonlara yedirilmeli. Gib bittikten sonra SGK borçlarını dağıtmalıyız.
+                    // Örnek: Bir ihracatçının hakedişleri: 100, 150, 50, 200
+                    // Gib borcu: 250, SGK borcu: 250
+                    // Şayet SGK'yı öncelikli olarak dağıtmaya başlarsam dağıtım şu şekilde olacak
+                    // 200'lük hakeşin tamamı SGK borcuna gidecek 150'lik hakedişin 50'si SGK'ya gidecek.
+                    // Geri kalan GİB borcu için 150'lik hakedişte 100'lük bir borç olacak.
+                    // 100'lük hakedişin ve 50'lik hakedişin tamamı borca gidecek. Toplamda 100, 100 ve 50 olmak üzere
+                    // 3 adet gib eft'si gönderilecek.
+                    if(!isMahsupTahakkukuVar){
+                        if (provizyonListesindekiToplamHakedis.compareTo(toplamBorc) < 0) {
+                            // Toplam Borç (SGK+GİB) hakedişten fazlaysa
+                            // Hakediş 10 bin, sgk borcu: 30 bin, gib: 20 bin diyelim
+                            // 10 binlik hakedişin 6 bini sgkya 4 bini gibe gitmeli
+                            odenecekToplamBorcForProvizyonList = provizyonListesindekiToplamHakedis;
+                            BigDecimal proportionOfSgk = odenecekSgkBorcuForProvizyonList.multiply(ONE_HUNDRED).divide(toplamBorc, 15, RoundingMode.HALF_UP);
+                            odenecekSgkBorcuForProvizyonList = proportionOfSgk.multiply(odenecekToplamBorcForProvizyonList).divide(ONE_HUNDRED, 2, RoundingMode.HALF_UP);
+                            odenecekGibBorcuForProvizyonList = odenecekToplamBorcForProvizyonList.subtract(odenecekSgkBorcuForProvizyonList);
+                            logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId()
+                                    + " MAHSUP YOK odenecekToplamBorcForProvizyonList: " + odenecekToplamBorcForProvizyonList.toPlainString()
+                                    + " odenecekSgkBorcuForProvizyonList: " + odenecekSgkBorcuForProvizyonList.toPlainString()
+                                    + " odenecekGibBorcuForProvizyonList: " + odenecekGibBorcuForProvizyonList.toPlainString());
+                        }
+                        if (odenecekSgkBorcuForProvizyonList.compareTo(sorgulananBorcBilgi.getToplamSgkBorcu()) > 0){
+                            handleBorcDagitimHatasi(sorgulananBorcBilgi);
+                            throw new ValidationException(sorgulananBorcBilgi.getVKnTckN() + " nolu TCKN/VKN için ödenecek SGK borcu: " + odenecekSgkBorcuForProvizyonList + " SGK'dan dönen toplam borç: " + sorgulananBorcBilgi.getToplamSgkBorcu());
+                        }
+                        sorgulananBorcBilgi.setOdenecekSgkBorcu(odenecekSgkBorcuForProvizyonList);
+                        if (odenecekGibBorcuForProvizyonList.compareTo(sorgulananBorcBilgi.getToplamGibBorcu()) > 0){
+                            handleBorcDagitimHatasi(sorgulananBorcBilgi);
+                            throw new ValidationException(sorgulananBorcBilgi.getVKnTckN() + " nolu TCKN/VKN için ödenecek GİB borcu: " + odenecekGibBorcuForProvizyonList + " GİB'den dönen toplam borç: " + sorgulananBorcBilgi.getToplamGibBorcu());
+                        }
+                        sorgulananBorcBilgi.setOdenecekGibBorcu(odenecekGibBorcuForProvizyonList);
+                        // Aşağıdaki borç bilgisi kaydet ekstra teste muhtaç
+                        try {
+                            borcBilgisiKaydet(provizyonList, odenecekSgkBorcuForProvizyonList, odenecekGibBorcuForProvizyonList, sorgulananBorcBilgi);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e.getMessage());
+                        }
+                        sorgulananBorcBilgi.setBorclarHakediseGoreDagitildi(true);
+                        sorgulananBorcBilgiService.kaydet(sorgulananBorcBilgi);
+                    }else {
+                        List<Provizyon> mahsupProvizyonList = new ArrayList<>();
+                        List<Provizyon> mahsupDisiProvizyonList = new ArrayList<>();
+                        for (Provizyon provizyon : provizyonList) {
+                            if(provizyon.getKarar().isMahsupKarar()){
+                                mahsupProvizyonList.add(provizyon);
+                            }else{
+                                mahsupDisiProvizyonList.add(provizyon);
+                            }
+                        }
+                        BigDecimal provizyonListesindekiMahsupToplamHakedis = getToplamTutarInMahsupProvizyonListesi(provizyonList);
+                        // mahsup tamamen sgk'ya yedirilmeli.
+                        BigDecimal mahsupTarafindanOdenecekSgkBorcuForProvizyonList;
+                        if(provizyonListesindekiMahsupToplamHakedis.compareTo(odenecekSgkBorcuForProvizyonList) < 0){
+                            // tüm mahsup hakedişi sgk borcuna gidecek ve hala sgk borcu kalmaya devam edecek.
+                            mahsupTarafindanOdenecekSgkBorcuForProvizyonList = provizyonListesindekiMahsupToplamHakedis;
+                        }else{
+                            mahsupTarafindanOdenecekSgkBorcuForProvizyonList = odenecekSgkBorcuForProvizyonList;
+                        }
+                        try {
+                            borcBilgisiKaydet(mahsupProvizyonList, mahsupTarafindanOdenecekSgkBorcuForProvizyonList, BigDecimal.ZERO, sorgulananBorcBilgi);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e.getMessage());
+                        }
 
+                        logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId()
+                                + " MAHSUP VAR provizyonListesindekiMahsupToplamHakedis: " + provizyonListesindekiMahsupToplamHakedis.toPlainString()
+                                + " mahsupTarafindanOdenecekSgkBorcuForProvizyonList: " + mahsupTarafindanOdenecekSgkBorcuForProvizyonList.toPlainString()
+                                + " odenecekSgkBorcuForProvizyonList: " + odenecekSgkBorcuForProvizyonList.toPlainString());
 
+                        odenecekSgkBorcuForProvizyonList = odenecekSgkBorcuForProvizyonList.subtract(mahsupTarafindanOdenecekSgkBorcuForProvizyonList);
+                        toplamBorc = toplamBorc.subtract(mahsupTarafindanOdenecekSgkBorcuForProvizyonList);
+                        BigDecimal mahsupOlmayanProvizyonListesindekiToplamHakedis = provizyonListesindekiToplamHakedis.subtract(provizyonListesindekiMahsupToplamHakedis);
+                        logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId()
+                                + " MAHSUP VAR odenecekSgkBorcuForProvizyonList: " + odenecekSgkBorcuForProvizyonList.toPlainString()
+                                + " toplamBorc: " + toplamBorc.toPlainString()
+                                + " mahsupOlmayanProvizyonListesindekiToplamHakedis: " + mahsupOlmayanProvizyonListesindekiToplamHakedis.toPlainString());
 
+                        if (mahsupOlmayanProvizyonListesindekiToplamHakedis.compareTo(toplamBorc) < 0) {
+                            // Toplam Borç (SGK+GİB) hakedişten fazlaysa
+                            // Hakediş 10 bin, sgk borcu: 30 bin, gib: 20 bin diyelim
+                            // 10 binlik hakedişin 6 bini sgkya 4 bini gibe gitmeli
+                            odenecekToplamBorcForProvizyonList = mahsupOlmayanProvizyonListesindekiToplamHakedis;
+                            BigDecimal proportionOfSgk = odenecekSgkBorcuForProvizyonList.multiply(ONE_HUNDRED).divide(toplamBorc, 15, RoundingMode.HALF_UP);
+                            odenecekSgkBorcuForProvizyonList = proportionOfSgk.multiply(odenecekToplamBorcForProvizyonList).divide(ONE_HUNDRED, 2, RoundingMode.HALF_UP);
+                            odenecekGibBorcuForProvizyonList = odenecekToplamBorcForProvizyonList.subtract(odenecekSgkBorcuForProvizyonList);
+                            logger.info("BorcIslemleriServiceImpl","SBB ID: " + sorgulananBorcBilgi.getId()
+                                    + " MAHSUP VAR odenecekToplamBorcForProvizyonList: " + odenecekToplamBorcForProvizyonList.toPlainString()
+                                    + " odenecekSgkBorcuForProvizyonList: " + odenecekSgkBorcuForProvizyonList.toPlainString()
+                                    + " odenecekGibBorcuForProvizyonList: " + odenecekGibBorcuForProvizyonList.toPlainString());
+                        }
+                        if (odenecekSgkBorcuForProvizyonList.compareTo(sorgulananBorcBilgi.getToplamSgkBorcu()) > 0){
+                            handleBorcDagitimHatasi(sorgulananBorcBilgi);
+                            throw new ValidationException(sorgulananBorcBilgi.getVKnTckN() + " nolu TCKN/VKN için ödenecek SGK borcu: " + odenecekSgkBorcuForProvizyonList + " SGK'dan dönen toplam borç: " + sorgulananBorcBilgi.getToplamSgkBorcu());
+                        }
+                        sorgulananBorcBilgi.setOdenecekSgkBorcu(odenecekSgkBorcuForProvizyonList.add(mahsupTarafindanOdenecekSgkBorcuForProvizyonList));
+                        if (odenecekGibBorcuForProvizyonList.compareTo(sorgulananBorcBilgi.getToplamGibBorcu()) > 0){
+                            handleBorcDagitimHatasi(sorgulananBorcBilgi);
+                            throw new ValidationException(sorgulananBorcBilgi.getVKnTckN() + " nolu TCKN/VKN için ödenecek GİB borcu: " + odenecekGibBorcuForProvizyonList + " GİB'den dönen toplam borç: " + sorgulananBorcBilgi.getToplamGibBorcu());
+                        }
+                        sorgulananBorcBilgi.setOdenecekGibBorcu(odenecekGibBorcuForProvizyonList);
+                        // Aşağıdaki borç bilgisi kaydet ekstra teste muhtaç
+                        try {
+                            borcBilgisiKaydet(mahsupDisiProvizyonList, odenecekSgkBorcuForProvizyonList, odenecekGibBorcuForProvizyonList, sorgulananBorcBilgi);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e.getMessage());
+                        }
+                        sorgulananBorcBilgi.setBorclarHakediseGoreDagitildi(true);
+                        sorgulananBorcBilgiService.kaydet(sorgulananBorcBilgi);
+                    }
+                }
+            } catch (Exception e) {
+                logger.error("BorcIslemleriServiceImpl",sorgulananBorcBilgi.getId() + " id'li sbb icin borc dagitimda hata mesaji: " + e.getMessage());
+                logger.error("BorcIslemleriServiceImpl",sorgulananBorcBilgi.getId() + " id'li sbb icin borc dagitimda hata: " + e);
+            }
+        }
+    }
 
+    private boolean isMahsupTahakkukuVar(List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList) throws Exception {
+        for (SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+            Long tahakkukId = sorgulananBorcBilgiTahakkuk.getTahakkukId();
+            Tahakkuk tahakkuk = tahakkukIslemleriService.getTahakkuk(tahakkukId);
+            KararDTO kararDTO = kararIslemleriService.getKararByKararNo(tahakkuk.getKararNo());
+            if(kararDTO.isMahsupKarar()){
+                return true;
+            }
+        }
+        return false;
+    }
 
+    private void handleBorcDagitimHatasi(SorgulananBorcBilgi sorgulananBilgi) {
+        String kayit = getTahakkukBilgileri(sorgulananBilgi);
+        String tcknVkn = StringUtils.isNotBlank(sorgulananBilgi.getVkn()) ? sorgulananBilgi.getVkn() : sorgulananBilgi.getTckn();
+        kayit += StringUtils.isNotBlank(sorgulananBilgi.getVkn()) ? "VKN: " : "TCKN: ";
+        kayit += tcknVkn;
+        kayit += ", GİB Sorgu ID: " + sorgulananBilgi.getGibDosyaId() + ", SGK Sorgu ID:" + sorgulananBilgi.getSgkDosyaId();
 
+        String subject = "OGMDFİF BORÇ DAGITIM SONUCU HATASI";
+        String body = "İlgili kaydın borç dağıtım sonucu başarısız olmuştur. Başarısız olan kayıt: \n" + kayit;
 
+        try {
+            mailService.sendMail(EmirIslemleriServiceImpl.OGM_BIRIM_MAIL, EmirIslemleriServiceImpl.TO_LIST_ALL, null, subject, body);
+        } catch (Exception ex) {
+            logger.error("BorcIslemleriServiceImpl","handleSgkBorcSorgulamaSonucHatasi bilgilendirme maili atilamadi. Hata: {}", ex.toString());
+        }
+    }
 
+    private List<Long> filterOdenebilirDurumdakiTahakkukList(Long tahakkukId) {
+        List<Long> odenebilirTahakkukIdList = new ArrayList<>();
+        boolean isOdenebilir = true;
+        List<Tahakkuk> iliskiliTahakkukList = new ArrayList<>();
+        Tahakkuk currentTahakkuk = tahakkukIslemleriService.getTahakkuk(tahakkukId);
+        TahakkukPaketiDosyasi tahakkukPaketiDosyasi = currentTahakkuk.getTahakkukPaketiDosyasi();
+        if (tahakkukPaketiDosyasi == null) {
+            iliskiliTahakkukList.add(currentTahakkuk);
+        } else {
+            iliskiliTahakkukList = tahakkukPaketiDosyasi.getTahakkukList();
+        }
 
+        Set<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukSet = new HashSet<>();
+        for (Tahakkuk tahakkuk : iliskiliTahakkukList) {
+            Long currentTahakkukId = tahakkuk.getId();
+            List<SorgulananBorcBilgiTahakkuk> currentSorgulananBorcBilgiTahakkukList =
+                    sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukListByTahakkukId(String.valueOf(currentTahakkukId));
+            sorgulananBorcBilgiTahakkukSet.addAll(currentSorgulananBorcBilgiTahakkukList);
+        }
 
+        if (sorgulananBorcBilgiTahakkukSet == null || sorgulananBorcBilgiTahakkukSet.isEmpty()) {
+            logger.error("BorcIslemleriServiceImpl","filterOdenebilirDurumdakiTahakkukList tahakkukId: " + tahakkukId);
+        } else {
+            for (SorgulananBorcBilgiTahakkuk sbbt : sorgulananBorcBilgiTahakkukSet) {
+                SorgulananBorcBilgi sorgulananBorcBilgi = sorgulananBorcBilgiService.getSorgulananBorcBilgi(sbbt.getSorgulananBorcBilgiId());
+                if (sorgulananBorcBilgi != null && (sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod())
+                        || sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.SORGU_SONUCU_BEKLIYOR.getKod()))) {
+                    isOdenebilir = false;
+                    break;
+                }
+            }
+        }
+        logger.info("BorcIslemleriServiceImpl","filterOdenebilirDurumdakiTahakkukList tahakkukId: " + tahakkukId + " isOdenebilir: " + isOdenebilir);
+        if (isOdenebilir) {
+            odenebilirTahakkukIdList.add(tahakkukId);
+        }
+        return odenebilirTahakkukIdList;
+    }
 
+    @Override
+    public void bugunkuTahakkuklariBul() {
+        Date bugun = new Date();
+        List<SorgulananBorcBilgi> sorgulananBorcBilgiList = sorgulananBorcBilgiService.getSorgulananBorcBilgiList(bugun);
+        for (SorgulananBorcBilgi sorgulananBorcBilgi : sorgulananBorcBilgiList) {
+            List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(sorgulananBorcBilgi.getId());
+            if(sorgulananBorcBilgiTahakkukList != null) {
+                for (SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+                    bugunkuTumTahakkukIdSet.add(sorgulananBorcBilgiTahakkuk.getTahakkukId());
+                }
+            }
+        }
+        logger.info("BorcIslemleriServiceImpl","bugunkuTahakkuklariBul bugunkuTumTahakkukIdSet: " + bugunkuTumTahakkukIdSet);
+    }
 
+    @Override
+    public void odenebilirlikKontroluYap() {
+        int setSizeLimit = 75;
+        if(bugunkuTumTahakkukIdSet.size() != (kontrolEdilmisOdenebilirTahakkukIdSet.size() + kontrolEdilmisOdenemezTahakkukIdSet.size())) {
+            Set<Long> kontrolEdilmemisTahakkukIdSet = new HashSet<>();
+            for(Long tahakkukId : bugunkuTumTahakkukIdSet) {
+                if (!kontrolEdilmisOdenebilirTahakkukIdSet.contains(tahakkukId) && !kontrolEdilmisOdenemezTahakkukIdSet.contains(tahakkukId)) {
+                    if(kontrolEdilmemisTahakkukIdSet.size() < setSizeLimit) {
+                        kontrolEdilmemisTahakkukIdSet.add(tahakkukId);
+                    }
 
+                    if(setSizeLimit == kontrolEdilmemisTahakkukIdSet.size()) {
+                        break;
+                    }
+                }
+            }
 
+            logger.info("BorcIslemleriServiceImpl", "kontrolEdilmemisTahakkukIdSet: " + kontrolEdilmemisTahakkukIdSet);
+            for (Long tahakkukId : kontrolEdilmemisTahakkukIdSet) {
+                List<SorgulananBorcBilgi> buPaketleIliskiliSbbList = sorgulananBorcBilgiService.getPaketleIliskiliTumTahakkuklarinSbbleri(tahakkukId);
+                if (!paketteIstemedigimizDurumlarVarMi(buPaketleIliskiliSbbList)) {
+                    kontrolEdilmisOdenebilirTahakkukIdSet.add(tahakkukId);
+                } else {
+                    kontrolEdilmisOdenemezTahakkukIdSet.add(tahakkukId);
+                }
+            }
+        }
 
-
-
-
-
-
-
-
-
-java.lang.IllegalStateException: Failed to load ApplicationContext
-
-	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContext(DefaultCacheAwareContextLoaderDelegate.java:132)
-	at org.springframework.test.context.support.DefaultTestContext.getApplicationContext(DefaultTestContext.java:124)
-	at org.springframework.test.context.web.ServletTestExecutionListener.setUpRequestContextIfNecessary(ServletTestExecutionListener.java:190)
-	at org.springframework.test.context.web.ServletTestExecutionListener.prepareTestInstance(ServletTestExecutionListener.java:132)
-	at org.springframework.test.context.TestContextManager.prepareTestInstance(TestContextManager.java:244)
-	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.createTest(SpringJUnit4ClassRunner.java:227)
-	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner$1.runReflectiveCall(SpringJUnit4ClassRunner.java:289)
-	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
-	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.methodBlock(SpringJUnit4ClassRunner.java:291)
-	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.runChild(SpringJUnit4ClassRunner.java:246)
-	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.runChild(SpringJUnit4ClassRunner.java:97)
-	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
-	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
-	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
-	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
-	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
-	at org.springframework.test.context.junit4.statements.RunBeforeTestClassCallbacks.evaluate(RunBeforeTestClassCallbacks.java:61)
-	at org.springframework.test.context.junit4.statements.RunAfterTestClassCallbacks.evaluate(RunAfterTestClassCallbacks.java:70)
-	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
-	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
-	at org.springframework.test.context.junit4.SpringJUnit4ClassRunner.run(SpringJUnit4ClassRunner.java:190)
-	at org.junit.runners.Suite.runChild(Suite.java:128)
-	at org.junit.runners.Suite.runChild(Suite.java:27)
-	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
-	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
-	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
-	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
-	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
-	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
-	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
-	at org.junit.runner.JUnitCore.run(JUnitCore.java:137)
-	at com.intellij.junit4.JUnit4IdeaTestRunner.startRunnerWithArgs(JUnit4IdeaTestRunner.java:69)
-	at com.intellij.rt.junit.IdeaTestRunner$Repeater$1.execute(IdeaTestRunner.java:38)
-	at com.intellij.rt.execution.junit.TestsRepeater.repeat(TestsRepeater.java:11)
-	at com.intellij.rt.junit.IdeaTestRunner$Repeater.startRunnerWithArgs(IdeaTestRunner.java:35)
-	at com.intellij.rt.junit.JUnitStarter.prepareStreamsAndStart(JUnitStarter.java:232)
-	at com.intellij.rt.junit.JUnitStarter.main(JUnitStarter.java:55)
-Caused by: org.springframework.beans.factory.UnsatisfiedDependencyException: Error creating bean with name 'ogmdfifEntityManagerFactory' defined in class path resource [tr/gov/tcmb/ogmdfif/config/DatabaseConfig.class]: Unsatisfied dependency expressed through method 'ogmdfifdEntityManagerFactory' parameter 0; nested exception is org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'ogmdfifDataSource' defined in class path resource [tr/gov/tcmb/ogmdfif/config/DatabaseConfig.class]: Initialization of bean failed; nested exception is org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'org.springframework.boot.autoconfigure.jdbc.DataSourceInitializerInvoker': Invocation of init method failed; nested exception is org.springframework.jdbc.datasource.init.ScriptStatementFailedException: Failed to execute SQL script statement #4 of URL [file:/C:/Users/k017253/IdeaProjects/2025/ogmdfifse/target/classes/schema.sql]: CREATE TABLE IF NOT EXISTS letter_request ( id UUID, request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id), scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id), scope_value VARCHAR(20), first_payment_date DATE NOT NULL, last_payment_date DATE NOT NULL, tahakkuk_turu VARCHAR(50), belge_no VARCHAR(50), yil INTEGER, karar_no_adi VARCHAR(200), firma_vkn VARCHAR(20), uretici_tckn VARCHAR(20), status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id), created_by VARCHAR(64) NOT NULL, branch_id VARCHAR(32) NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL, updater VARCHAR(64), attempt_count SMALLINT NOT NULL DEFAULT 0, last_attempt_at TIMESTAMP, next_attempt_at TIMESTAMP, processing_started_at TIMESTAMP, processing_finished_at TIMESTAMP, processing_duration_ms INTEGER, last_error_code VARCHAR(64), last_error_message TEXT, notify_emails TEXT, notify_sent BOOLEAN NOT NULL DEFAULT FALSE, notify_sent_at TIMESTAMP, notify_to_list TEXT, primary key (id,created_at) ) partition by RANGE (created_at); nested exception is org.h2.jdbc.JdbcSQLSyntaxErrorException: Syntax error in SQL statement "create table if not exists letter_request ( id uuid, request_type_id smallint not null references ref_letter_request_type(id), scope_id smallint not null references ref_letter_scope(id), scope_value varchar(20), first_payment_date date not null, last_payment_date date not null, tahakkuk_turu varchar(50), belge_no varchar(50), yil integer, karar_no_adi varchar(200), firma_vkn varchar(20), uretici_tckn varchar(20), status_id smallint not null references ref_letter_status(id), created_by varchar(64) not null, branch_id varchar(32) not null, created_at timestamp not null, updated_at timestamp not null, updater varchar(64), attempt_count smallint not null default 0, last_attempt_at timestamp, next_attempt_at timestamp, processing_started_at timestamp, processing_finished_at timestamp, processing_duration_ms integer, last_error_code varchar(64), last_error_message text, notify_emails text, notify_sent boolean not null default false, notify_sent_at timestamp, notify_to_list text, primary key (id,created_at) ) partition[*] by range (created_at)"; SQL statement:
-CREATE TABLE IF NOT EXISTS letter_request ( id UUID, request_type_id SMALLINT NOT NULL REFERENCES ref_letter_request_type(id), scope_id SMALLINT NOT NULL REFERENCES ref_letter_scope(id), scope_value VARCHAR(20), first_payment_date DATE NOT NULL, last_payment_date DATE NOT NULL, tahakkuk_turu VARCHAR(50), belge_no VARCHAR(50), yil INTEGER, karar_no_adi VARCHAR(200), firma_vkn VARCHAR(20), uretici_tckn VARCHAR(20), status_id SMALLINT NOT NULL REFERENCES ref_letter_status(id), created_by VARCHAR(64) NOT NULL, branch_id VARCHAR(32) NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL, updater VARCHAR(64), attempt_count SMALLINT NOT NULL DEFAULT 0, last_attempt_at TIMESTAMP, next_attempt_at TIMESTAMP, processing_started_at TIMESTAMP, processing_finished_at TIMESTAMP, processing_duration_ms INTEGER, last_error_code VARCHAR(64), last_error_message TEXT, notify_emails TEXT, notify_sent BOOLEAN NOT NULL DEFAULT FALSE, notify_sent_at TIMESTAMP, notify_to_list TEXT, primary key (id,created_at) ) partition by RANGE (created_at) [42000-200]
-	at org.springframework.beans.factory.support.ConstructorResolver.createArgumentArray(ConstructorResolver.java:800)
-
-
-
-@Primary
-    @Bean(name = "ogmdfifEntityManagerFactory")
-    public LocalContainerEntityManagerFactoryBean ogmdfifdEntityManagerFactory(
-            @Qualifier("ogmdfifDataSource") DataSource ogmdfifDataSource) {
-
-        LocalContainerEntityManagerFactoryBean emFactoryBean = new LocalContainerEntityManagerFactoryBean();
-
-        emFactoryBean.setDataSource(ogmdfifDataSource);
-        emFactoryBean.setPersistenceUnitName("ogmdfif-PU");
-        emFactoryBean.setPersistenceProviderClass(HibernatePersistenceProvider.class);
-        emFactoryBean.setPackagesToScan(
-                "tr.gov.tcmb.ogmdfif.model.entity",
-                "tr.gov.tcmb.ogmdfif.model", "tr.gov.tcmb.auditing.model"
-        );
-        emFactoryBean.setJpaVendorAdapter(new HibernateJpaVendorAdapter());
-        emFactoryBean.setJpaProperties(getJpaProperties());
-
-        return emFactoryBean;
+        logger.info("BorcIslemleriServiceImpl","kontrolEdilmisOdenebilirTahakkukIdSet: " + kontrolEdilmisOdenebilirTahakkukIdSet);
+        logger.info("BorcIslemleriServiceImpl","kontrolEdilmisOdenemezTahakkukIdSet: " + kontrolEdilmisOdenemezTahakkukIdSet);
+        logger.info("BorcIslemleriServiceImpl","Toplam tahakkuk sayı: " + bugunkuTumTahakkukIdSet.size() + " , "
+                + "Ödenebilir tahakkuk sayı: " + kontrolEdilmisOdenebilirTahakkukIdSet.size() + " , "
+                + "Ödenemez tahakkuk sayı: " + kontrolEdilmisOdenemezTahakkukIdSet.size());
     }
 
 
 
 
-/////
-
-project.name=OGMDFIFSE
-spring.application.name=ogmdfifse
-spring.banner.location=classpath:/static/banner.txt
-
-server.servlet.encoding.enabled=true
-server.servlet.encoding.force=true
-server.servlet.encoding.charset=UTF-8
-server.max-http-header-size=32KB
-server.port=8080
-server.shutdown=graceful
-
-management.endpoints.enabled-by-default=false
-management.endpoint.info.enabled=true
-management.endpoint.health.enabled=true
-management.endpoint.health.probes.enabled=true
-management.endpoint.health.group.readiness.include=readinessState,db,rabbit,mongo
-management.endpoint.health.show-details=always
-management.endpoint.health.show-components=always
-
-info.app.name=@project.name@
-info.app.version=@project.version@
-info.app.groupId=@project.groupId@
-info.app.artifactId=@project.artifactId@
-info.app.encoding=@project.build.sourceEncoding@
-info.app.java.version=@java.version@
-
-spring.jpa.database=POSTGRESQL
-#spring.datasource.driver-class-name=org.postgresql.Driver
-#spring.datasource.initialization-mode=never
-#spring.datasource.platform=postgres
-spring.config.import=platform-log.properties,optional:file:/vault/secrets/postgresql.properties,optional:file:/vault/secrets/apigw.properties,optional:file:/vault/secrets/custom.properties
-
-# loglar localde anla??l?r olsun diye
-#logging.pattern.console=${CONSOLE_LOG_PATTERN:-%clr(%d{${LOG_DATEFORMAT_PATTERN:-yyyy-MM-dd HH:mm:ss.SSS}}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}}
-
-spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
-spring.jpa.properties.hibernate.format_sql=true
-#spring.datasource.type=com.zaxxer.hikari.HikariDataSource
-#spring.datasource.hikari.maximum-pool-size=2
-#spring.datasource.url=jdbc:postgresql://${postgresql1}/ogmdfif?ssl=false&sslmode=disable
-spring.lifecycle.timeout-per-shutdown-phase=20s
-spring.jpa.properties.hibernate.ejb.interceptor=tr.gov.tcmb.ogmdfif.interceptor.AuditInterceptor
-
-#spring.datasource.hikari.max-lifetime=590000
-
-uygulama.tb.endpoint=${uygulamaTbEndpoint}
-uygulama.tb.user=${uygulamaTbUser}
-
-# teste kurulurken false yap
-uygulama.ortam.isLocal=false
-
-spring.jpa.properties.hibernate.default_schema=OGMDFIFODM
-
-
-#################################################################################################
-#																								#
-#	container ortaminda -Dspring.profiles.active ile imaj run edilecek, test edilmek istenirse	#
-#	spring.profiles.active=TCMB.TEST															#
-#																								#
-#################################################################################################
-
-#####################
-#					#
-#	test amacli		#
-#					#
-#####################
-tcmb.ortam=default
-tcmb.random.int=${random.int}
-
-#################
-#				#
-#	endpoint	#
-#				#
-#################
-# belki de bunu vermeyecegiz
-
-#################
-#				#
-#	logging		#
-#				#
-#################
-# LOGLAR SYSOUT'A YAZILACAK
-# tcmb.log.file.name=/applog/ogmdfif.log
-# log config logback-spring.xml ile yapiliyor, localde CONSOLE, diger ortamlarda FILE appender kullaniliyor
-# dolayisiyla application-{profile}.properties dosyalarinda logging.file.name ={tcmb.log.file.name} olarak veriliyor
-# org/springframework/boot/logging/logback/file-appender.xml daki default degerler kullaniliyor
-# LOG_FILE_MAX_SIZE = 10MB , LOG_FILE_MAX_HISTORY = 7 gun vs
-# bu degerler application.properties dosyasinda yada logback-spring.xml de degistirilebilir
-# <property name="LOG_FILE_MAX_SIZE" value="5MB"/> gibi
-
-#################
-#				#
-#	multipart	#
-#				#
-#################
-spring.servlet.multipart.max-file-size=5MB
-spring.servlet.multipart.max-request-size=5MB
-
-#####################################
-#									#
-#	veri tabani ve connection pool	#
-#									#
-#####################################
-#spring.datasource.jdbc-url=jdbc:postgresql://${postgresql1}/ogmdfif?ssl=false&sslmode=disable
-#spring.jpa.show-sql=true
-#spring.jpa.properties.hibernate.format_sql=true
-# default olarak view rendering esnasinda query perform edilir, view layerinda sessionin acik kalmasi gerekiyorsa silinmeleli/true olmali
-spring.jpa.open-in-view=false
-#connection pool spring boot 2 ile beraber default olarak HIKARICP , https://github.com/brettwooldridge/HikariCP#configuration-knobs-baby
-#logging.level.com.zaxxer.hikari.HikariConfig=DEBUG
-#spring.datasource.hikari.pool-name=cp-OGMDFIF
-
-ssl.trust-store=certificate/cacerts
-ssl.trust-store-password=changeit
-
-ssl.key-store=src/main/resources/certificate/client-keystore.jks
-ssl.key-store-password=changeit
-
-eft.girilenKasMesajBySorguNo.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/getGirilenKasMesajBySorguNo/
-eft.posDurum.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/pos-durum/
-eft.mesajSorguNo.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/sorgu-numarasi/
-eft.mesaj.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/
-eft.xsdDogrula.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/util/xsdDogrula/
-eft.hataliMesajList.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/getHataliMesajList/
-eft.hataliMesajDurumuGuncelle.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/hataliMesajDurumuGuncelle/
-eft.mesajGidecek.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/gidecek/
-eft.gunlukKasMesajlar.servis.pathprefix=/mgmosypms-eft/api/mgmosyp/mesaj/getGunlukKasMesajlar/
-
-muhasebe.servis.pathprefix=/submuhbms-muhmfis/
-muhasebeHesap.servis.pathprefix=/submuhbms-muhmfis/query/hesap/
-muhasebeServis.servis.pathprefix=/submuhbms-muhmfis/public/servis/
-muhasebeParaBirimi.servis.pathprefix=/submuhbms-muhmfis/public/para-birimi/
-
-banka.servis.pathprefix=/MBNBAYUSE/public/api/banks/
-
-dfif.ops.scheduling.enable=true
-
-shedlock.emir-isletim-job.lock-at-most=PT10m
-shedlock.emir-isletim-job.lock-at-least=PT1m
-
-shedlock.sgk-borc-eft-islemleri-yap-job.lock-at-most=PT10m
-shedlock.sgk-borc-eft-islemleri-yap-job.lock-at-least=PT1m
-
-shedlock.emir-gun-sonu-iptal-islemleri-job.lock-at-most=PT10m
-shedlock.emir-gun-sonu-iptal-islemleri-job.lock-at-least=PT1m
-
-shedlock.ortak-borc-job.lock-at-most=PT10m
-shedlock.ortak-borc-job.lock-at-least=PT1m
-
-shedlock.anlik-borc-job.lock-at-most=PT10m
-shedlock.anlik-borc-job.lock-at-least=PT1m
-
-shedlock.sgk-job.lock-at-most=PT2m
-shedlock.sgk-job.lock-at-least=PT1m
-
-shedlock.gib-job.lock-at-most=PT3m
-shedlock.gib-job.lock-at-least=PT2m
-
-shedlock.hatali-eft-kontrol-job.lock-at-most=PT4m
-shedlock.hatali-eft-kontrol-job.lock-at-least=PT3m
-
-shedlock.provizyon-odeme-geri-al-job.lock-at-most=PT10m
-shedlock.provizyon-odeme-geri-al-job.lock-at-least=PT1m
-
-sgk.webservis.kurumKodu=${sgkWebservisKurumKodu}
-sgk.webservis.username=${sgkWebservisUsername}
-
-sgk.servis.scheme=${sgkServisScheme}
-sgk.servis.host=${sgkServisHost}
-
-ziraatBankasiScheme=${ziraatBankasiScheme}
-ziraatBankasiHost=${ziraatBankasiHost}
-#ziraatBankasiSifre=${ziraatBankasiSifre}
-ziraat.oauth2.tokenUrl=${ziraat.oauth2.tokenUrl}
-ziraat.oauth2.clientId=${ziraat.oauth2.clientId}
-#ziraat.oauth2.clientSecret=${ziraat.oauth2.clientSecret}
-ziraat.oauth2.username=${ziraat.oauth2.username}
-#ziraat.oauth2.password=${ziraat.oauth2.password}
-ziraat.oauth2.scope=${ziraat.oauth2.scope}
-
-spring.codec.max-in-memory-size=100MB
-
-gibUrl=${gibUrl}
-uygulama_muhmfis_endpoint=${uygulama_muhmfis_endpoint}
-uygulama_mgmmubs_endpoint=${uygulama_mgmmubs_endpoint}
-uygulama_eft_endpoint=${uygulama_eft_endpoint}
-uygulama_email_endpoint=${uygulama_email_endpoint}
-uygulama_saos_endpoint=${uygulama_saos_endpoint}
-uygulama_ortak_muhasebe_init_endpoint=${uygulama_ortak_muhasebe_init_endpoint}
-uygulama_ortak_muhasebe_admin_endpoint=${uygulama_ortak_muhasebe_admin_endpoint}
-uygulama_mbnayuse_endpoint=${uygulama_mbnayuse_endpoint}
-kurServisScheme=${kurServisScheme}
-kurServisHost=${kurServisHost}
-kurServisPathprefix=${kurServisPathprefix}
-epostaServisScheme=${epostaServisScheme}
-epostaServisHost=${epostaServisHost}
-epostaServisPathprefix=${epostaServisPathprefix}
-muhasebeServisScheme=${muhasebeServisScheme}
-muhasebeServisHost=${muhasebeServisHost}
-muhasebeServisPathprefix=${muhasebeServisPathprefix}
-eftServisScheme=${eftServisScheme}
-eftServisHost=${eftServisHost}
-bankaServisScheme=${bankaServisScheme}
-bankaServisHost=${bankaServisHost}
-uygulama_bfrortmmsMuhasebe_endpoint=${uygulama_bfrortmmsMuhasebe_endpoint}
-muhasebe.servis.scheme=${muhasebe.servis.scheme}
-muhasebe.servis.host=${muhasebe.servis.host}
-banka.servis.scheme=${banka.servis.scheme}
-banka.servis.host=${banka.servis.host}
-eft.servis.scheme=${eft.servis.scheme}
-eft.servis.host=${eft.servis.host}
-
-uygulama_ortak_muhasebe_scheme=${uygulama_ortak_muhasebe_scheme}
-uygulama_ortak_muhasebe_host=${uygulama_ortak_muhasebe_host}
-
-eposta.servis.scheme=${epostaServisScheme}
-eposta.servis.host=${epostaServisHost}
-eposta.servis.pathprefix=${epostaServisPathprefix}
-
-kur.servis.scheme=${kurServisScheme}
-kur.servis.host=${kurServisHost}
-kur.servis.pathprefix=${kurServisPathprefix}
-
-
-#25.08.2025 todo include yap?ya ta??nacakt?r
-# Thread pool ayarlar?
-letterreq.executor.core-pool-size=5
-letterreq.executor.max-pool-size=5
-letterreq.executor.queue-capacity=150
-letterreq.executor.thread-name-prefix=letter-req-
-
-# Timeout ayarlar? (ms cinsinden)
-letterreq.per-task-timeout-ms=4000
-letterreq.global-timeout-ms=15000
-
-spring.jpa.properties.hibernate.jdbc.batch_size=100
-spring.jpa.properties.hibernate.order_inserts=true
-spring.jpa.properties.hibernate.order_updates=true
-spring.jpa.properties.hibernate.generate_statistics=false
-
-ogmdfif.datasource.driver-class-name=org.postgresql.Driver
-ogmdfif.datasource.jdbcUrl=jdbc:postgresql://${postgresql1}/ogmdfif?ssl=false&sslmode=disable
-ogmdfif.datasource.hikari.pool-name=cp-OGMDFIF
-ogmdfif.datasource.hikari.minimum-idle=2
-ogmdfif.datasource.hikari.maximum-pool-size=20
-ogmdfif.datasource.hikari.max-lifetime=550000
-ogmdfif.datasource.hikari.idle-timeout=500000
-ogmdfif.datasource.hikari.leak-detection-threshold=30000
-ogmdfif.hibernate.default_schema=ogmdfif
-ogmdfif.hibernate.show_sql=true
-ogmdfif.hibernate.format_sql=true
-ogmdfif.hibernate.hbm2ddl.auto=none
-
-
-logging.level.com.zaxxer.hikari=TRACE
-management.info.env.enabled=true
-
-
-
-///////////////
-
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
-
-    <parent>
-        <groupId>BIEPLTF</groupId>
-        <artifactId>BIEPLTFMD-PARENT</artifactId>
-        <version>1.0.0-3</version>
-    </parent>
-
-    <groupId>OGMDFIF</groupId>
-    <artifactId>OGMDFIFSE</artifactId>
-    <version>${versionNumber}</version>
-    <name>OGMDFIFSE</name>
-    <description>Destekleme ve Fiyat İstikrar Fonu</description>
-
-    <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <project.compiler.encoding>UTF-8</project.compiler.encoding>
-        <versionNumber>0.0.1</versionNumber>
-        <buildImage>biepltf/biepltfcm-buildimage/jdk11</buildImage>
-    </properties>
-
-    <dependencies>
-        <!-- Spring -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-        </dependency>
-
-        <!-- PDF / Office -->
-        <dependency>
-            <groupId>org.apache.pdfbox</groupId>
-            <artifactId>pdfbox</artifactId>
-            <version>2.0.22</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi-ooxml</artifactId>
-            <version>5.2.3</version>
-        </dependency>
-        <dependency>
-            <groupId>org.docx4j</groupId>
-            <artifactId>docx4j</artifactId>
-            <version>6.1.2</version>
-        </dependency>
-        <dependency>
-            <groupId>org.docx4j</groupId>
-            <artifactId>docx4j-export-fo</artifactId>
-            <version>6.1.0</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.xmlgraphics</groupId>
-            <artifactId>fop</artifactId>
-            <version>2.6</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.xmlbeans</groupId>
-            <artifactId>xmlbeans</artifactId>
-            <version>5.1.1</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>ooxml-schemas</artifactId>
-            <version>1.4</version>
-        </dependency>
-
-        <!-- Mail -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-mail</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>javax.mail</groupId>
-            <artifactId>mail</artifactId>
-            <version>1.4.7</version>
-        </dependency>
-        <!-- Java 11'de gerekli: Activation -->
-        <dependency>
-            <groupId>com.sun.activation</groupId>
-            <artifactId>jakarta.activation</artifactId>
-            <version>1.2.2</version>
-        </dependency>
-
-        <!-- DB / Driver -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!-- Utils -->
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-lang3</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.httpcomponents</groupId>
-            <artifactId>httpclient</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>commons-logging</groupId>
-            <artifactId>commons-logging</artifactId>
-            <version>1.1</version>
-        </dependency>
-
-        <!-- Swagger (not: 2.9.2 runtime’da Spring Boot 2.6+ ile uyumsuzluk çıkarabilir) -->
-        <dependency>
-            <groupId>io.springfox</groupId>
-            <artifactId>springfox-swagger2</artifactId>
-            <version>2.9.2</version>
-        </dependency>
-
-        <!-- Kurum içi modüller -->
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-SECURITY</artifactId>
-            <version>1.0.0-18</version>
-        </dependency>
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-LOG</artifactId>
-            <version>1.0.0-8</version>
-        </dependency>
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-DBUTIL243</artifactId>
-            <version>1.0.0-3</version>
-        </dependency>
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-EDSUTIL</artifactId>
-            <version>1.0.0-16</version>
-        </dependency>
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-REACTIVEEDSUTIL</artifactId>
-            <version>1.0.0-5</version>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-webflux</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-AUDIT</artifactId>
-            <version>1.0.0-9</version>
-        </dependency>
-        <dependency>
-            <groupId>BIEPLTF</groupId>
-            <artifactId>BIEPLTFMD-WEB</artifactId>
-            <version>1.0.0-2</version>
-        </dependency>
-
-        <!-- Cache / ShedLock -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cache</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>net.javacrumbs.shedlock</groupId>
-            <artifactId>shedlock-spring</artifactId>
-            <version>4.44.0</version>
-        </dependency>
-        <dependency>
-            <groupId>net.javacrumbs.shedlock</groupId>
-            <artifactId>shedlock-provider-jdbc-template</artifactId>
-            <version>4.44.0</version>
-        </dependency>
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
-            <version>3.1.8</version>
-        </dependency>
-
-        <!-- Jackson 2.x -->
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-            <version>2.13.4</version>
-        </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-core</artifactId>
-            <version>2.13.4</version>
-        </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-annotations</artifactId>
-            <version>2.13.4</version>
-        </dependency>
-        <!-- Jackson 1.x modülü KALDIRILDI; yerine hibernate5 datatype eklendi -->
-        <dependency>
-            <groupId>com.fasterxml.jackson.datatype</groupId>
-            <artifactId>jackson-datatype-hibernate5</artifactId>
-            <version>2.13.4</version>
-        </dependency>
-
-        <!-- JAXB (Java 11 için gerekli) -->
-        <dependency>
-            <groupId>jakarta.xml.bind</groupId>
-            <artifactId>jakarta.xml.bind-api</artifactId>
-            <version>2.3.3</version>
-        </dependency>
-        <dependency>
-            <groupId>org.glassfish.jaxb</groupId>
-            <artifactId>jaxb-runtime</artifactId>
-            <version>2.3.3</version>
-        </dependency>
-
-        <!-- iText -->
-        <dependency>
-            <groupId>com.itextpdf</groupId>
-            <artifactId>itextpdf</artifactId>
-            <version>5.5.0</version>
-        </dependency>
-
-        <!-- JAX-WS RI (pom türünde) -->
-        <dependency>
-            <groupId>com.sun.xml.ws</groupId>
-            <artifactId>jaxws-ri</artifactId>
-            <version>2.3.3</version>
-            <type>pom</type>
-        </dependency>
-
-        <!-- Lombok -->
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <version>1.18.28</version>
-        </dependency>
-
-        <!-- Kurum içi / diğer -->
-        <dependency>
-            <groupId>SUBMUHB</groupId>
-            <artifactId>SUBMUHBMD-PIKUR</artifactId>
-            <version>2.7.0-7</version>
-        </dependency>
-        <dependency>
-            <groupId>tcmb.platform</groupId>
-            <artifactId>xml</artifactId>
-            <version>R2_9_0</version>
-            <scope>provided</scope>
-        </dependency>
-
-        <!-- Test -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.h2database</groupId>
-            <artifactId>h2</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.platform</groupId>
-            <artifactId>junit-platform-runner</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.mockito</groupId>
-            <artifactId>mockito-inline</artifactId>
-            <version>3.8.0</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.mockito</groupId>
-            <artifactId>mockito-core</artifactId>
-        </dependency>
-
-        <!-- Devtools -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-devtools</artifactId>
-            <optional>true</optional>
-        </dependency>
-
-        <!-- JSON -->
-        <dependency>
-            <groupId>com.google.code.gson</groupId>
-            <artifactId>gson</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.vaadin.external.google</groupId>
-            <artifactId>android-json</artifactId>
-            <version>0.0.20131108.vaadin1</version>
-        </dependency>
-
-        <!-- Diğer kurum içi -->
-        <dependency>
-            <groupId>MGMOSYP</groupId>
-            <artifactId>MGMOSYPMD-MODEL</artifactId>
-            <version>1.3.0-16</version>
-        </dependency>
-
-        <!-- Test bean matchers -->
-        <dependency>
-            <groupId>com.google.code.bean-matchers</groupId>
-            <artifactId>bean-matchers</artifactId>
-            <version>0.13</version>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <finalName>app</finalName>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-
-            <!-- Java 11 derleme -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
-                <configuration>
-                    <release>11</release>
-                    <fork>true</fork>
-                    <encoding>UTF-8</encoding>
-                    <compilerArgs>
-                        <arg>-Xlint:unchecked</arg>
-                        <arg>-Xlint:deprecation</arg>
-                    </compilerArgs>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                            <version>1.18.28</version>
-                        </path>
-                        <path>
-                            <groupId>org.hibernate</groupId>
-                            <artifactId>hibernate-jpamodelgen</artifactId>
-                            <version>5.6.15.Final</version>
-                        </path>
-                    </annotationProcessorPaths>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-
-    <profiles>
-        <profile>
-            <id>local.profile</id>
-            <properties/>
-        </profile>
-        <profile>
-            <id>bamboo.profile</id>
-            <properties>
-                <versionNumber>${bambooVersionNumber}</versionNumber>
-            </properties>
-        </profile>
-    </profiles>
-</project>
-
-
------
-
-C:\Users\k017253\Downloads\openjdk-11.0.2_windows-x64_bin\jdk-11.0.2\bin\java.exe -Dmaven.multiModuleProjectDirectory=C:\Users\k017253\IdeaProjects\ogm\ogmdfifse -Djansi.passthrough=true -Dmaven.home=C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3 -Dclassworlds.conf=C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\bin\m2.conf "-Dmaven.ext.class.path=C:\Users\k017253\AppData\Local\JetBrains\IntelliJ IDEA 2024.3.1.1\plugins\maven\lib\maven-event-listener.jar" "-javaagent:C:\Users\k017253\AppData\Local\JetBrains\IntelliJ IDEA 2024.3.1.1\lib\idea_rt.jar=60067:C:\Users\k017253\AppData\Local\JetBrains\IntelliJ IDEA 2024.3.1.1\bin" -Dfile.encoding=UTF-8 -classpath C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\boot\plexus-classworlds-2.6.0.jar;C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\boot\plexus-classworlds.license org.codehaus.classworlds.Launcher -Didea.version=2024.3.1.1 -DskipTests=true clean install -X
-Apache Maven 3.6.3 (cecedd343002696d0abb50b32b541b8a6ba2883f)
-Maven home: C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3
-Java version: 11.0.2, vendor: Oracle Corporation, runtime: C:\Users\k017253\Downloads\openjdk-11.0.2_windows-x64_bin\jdk-11.0.2
-Default locale: en_US, platform encoding: UTF-8
-OS name: "windows 10", version: "10.0", arch: "amd64", family: "windows"
-[DEBUG]   Included C:\Users\k017253\AppData\Local\JetBrains\IntelliJ IDEA 2024.3.1.1\plugins\maven\lib\maven-event-listener.jar
-[DEBUG] Populating class realm maven.ext
-[DEBUG]   Included C:\Users\k017253\AppData\Local\JetBrains\IntelliJ IDEA 2024.3.1.1\plugins\maven\lib\maven-event-listener.jar
-[DEBUG] Created new class realm maven.api
-[DEBUG] Importing foreign packages into class realm maven.api
-[DEBUG]   Imported: javax.annotation.* < maven.ext
-[DEBUG]   Imported: javax.annotation.security.* < maven.ext
-[DEBUG]   Imported: javax.enterprise.inject.* < maven.ext
-[DEBUG]   Imported: javax.enterprise.util.* < maven.ext
-[DEBUG]   Imported: javax.inject.* < maven.ext
-[DEBUG]   Imported: org.apache.maven.* < maven.ext
-[DEBUG]   Imported: org.apache.maven.artifact < maven.ext
-[DEBUG]   Imported: org.apache.maven.classrealm < maven.ext
-[DEBUG]   Imported: org.apache.maven.cli < maven.ext
-[DEBUG]   Imported: org.apache.maven.configuration < maven.ext
-[DEBUG]   Imported: org.apache.maven.exception < maven.ext
-[DEBUG]   Imported: org.apache.maven.execution < maven.ext
-[DEBUG]   Imported: org.apache.maven.execution.scope < maven.ext
-[DEBUG]   Imported: org.apache.maven.lifecycle < maven.ext
-[DEBUG]   Imported: org.apache.maven.model < maven.ext
-[DEBUG]   Imported: org.apache.maven.monitor < maven.ext
-[DEBUG]   Imported: org.apache.maven.plugin < maven.ext
-[DEBUG]   Imported: org.apache.maven.profiles < maven.ext
-[DEBUG]   Imported: org.apache.maven.project < maven.ext
-[DEBUG]   Imported: org.apache.maven.reporting < maven.ext
-[DEBUG]   Imported: org.apache.maven.repository < maven.ext
-[DEBUG]   Imported: org.apache.maven.rtinfo < maven.ext
-[DEBUG]   Imported: org.apache.maven.settings < maven.ext
-[DEBUG]   Imported: org.apache.maven.toolchain < maven.ext
-[DEBUG]   Imported: org.apache.maven.usability < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.* < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.authentication < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.authorization < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.events < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.observers < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.proxy < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.repository < maven.ext
-[DEBUG]   Imported: org.apache.maven.wagon.resource < maven.ext
-[DEBUG]   Imported: org.codehaus.classworlds < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.* < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.classworlds < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.component < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.configuration < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.container < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.context < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.lifecycle < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.logging < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.personality < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.util.xml.Xpp3Dom < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.util.xml.pull.XmlPullParser < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.util.xml.pull.XmlPullParserException < maven.ext
-[DEBUG]   Imported: org.codehaus.plexus.util.xml.pull.XmlSerializer < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.* < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.artifact < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.collection < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.deployment < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.graph < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.impl < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.installation < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.internal.impl < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.metadata < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.repository < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.resolution < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.spi < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.transfer < maven.ext
-[DEBUG]   Imported: org.eclipse.aether.version < maven.ext
-[DEBUG]   Imported: org.fusesource.jansi.* < maven.ext
-[DEBUG]   Imported: org.slf4j.* < maven.ext
-[DEBUG]   Imported: org.slf4j.event.* < maven.ext
-[DEBUG]   Imported: org.slf4j.helpers.* < maven.ext
-[DEBUG]   Imported: org.slf4j.spi.* < maven.ext
-[DEBUG] Populating class realm maven.api
-[INFO] Error stacktraces are turned on.
-[DEBUG] Message scheme: color
-[DEBUG] Message styles: debug info warning error success failure strong mojo project
-[DEBUG] Reading global settings from C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\conf\settings.xml
-[DEBUG] Reading user settings from C:\Users\k017253\.m2\settings.xml
-[DEBUG] Reading global toolchains from C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\conf\toolchains.xml
-[DEBUG] Reading user toolchains from C:\Users\k017253\.m2\toolchains.xml
-[DEBUG] Using local repository at C:\Users\k017253\.m2\repository
-[DEBUG] Using manager EnhancedLocalRepositoryManager with priority 10.0 for C:\Users\k017253\.m2\repository
-[INFO] Scanning for projects...
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for central (https://repo.maven.apache.org/maven2).
-[DEBUG] Extension realms for project OGMDFIF:OGMDFIFSE:jar:0.0.1: (none)
-[DEBUG] Looking up lifecycle mappings for packaging jar from ClassRealm[maven.ext, parent: ClassRealm[plexus.core, parent: null]]
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for sonatype-nexus-snapshots (https://oss.sonatype.org/content/repositories/snapshots).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for apache.snapshots (https://repository.apache.org/snapshots).
-[DEBUG] Extension realms for project BIEPLTF:BIEPLTFMD-PARENT:pom:1.0.0-3: (none)
-[DEBUG] Looking up lifecycle mappings for packaging pom from ClassRealm[maven.ext, parent: ClassRealm[plexus.core, parent: null]]
-[DEBUG] Extension realms for project org.springframework.boot:spring-boot-starter-parent:pom:2.4.3: (none)
-[DEBUG] Looking up lifecycle mappings for packaging pom from ClassRealm[maven.ext, parent: ClassRealm[plexus.core, parent: null]]
-[DEBUG] Extension realms for project org.springframework.boot:spring-boot-dependencies:pom:2.4.3: (none)
-[DEBUG] Looking up lifecycle mappings for packaging pom from ClassRealm[maven.ext, parent: ClassRealm[plexus.core, parent: null]]
-[WARNING] 
-[WARNING] Some problems were encountered while building the effective model for OGMDFIF:OGMDFIFSE:jar:0.0.1
-[WARNING] 'version' contains an expression but should be a constant. @ OGMDFIF:OGMDFIFSE:${versionNumber}, C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\pom.xml, line 12, column 14
-[WARNING] 
-[WARNING] It is highly recommended to fix these problems because they threaten the stability of your build.
-[WARNING] 
-[WARNING] For this reason, future Maven versions might no longer support building such malformed projects.
-[WARNING] 
-[DEBUG] === REACTOR BUILD PLAN ================================================
-[DEBUG] Project: OGMDFIF:OGMDFIFSE:jar:0.0.1
-[DEBUG] Tasks:   [clean, install]
-[DEBUG] Style:   Regular
-[DEBUG] =======================================================================
-[INFO] 
-[INFO] -------------------------< OGMDFIF:OGMDFIFSE >--------------------------
-[INFO] Building OGMDFIFSE 0.0.1
-[INFO] --------------------------------[ jar ]---------------------------------
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for plexus.snapshots (https://oss.sonatype.org/content/repositories/plexus-snapshots).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for apache.snapshots (http://repository.apache.org/snapshots).
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] Lifecycle default -> [validate, initialize, generate-sources, process-sources, generate-resources, process-resources, compile, process-classes, generate-test-sources, process-test-sources, generate-test-resources, process-test-resources, test-compile, process-test-classes, test, prepare-package, package, pre-integration-test, integration-test, post-integration-test, verify, install, deploy]
-[DEBUG] Lifecycle clean -> [pre-clean, clean, post-clean]
-[DEBUG] Lifecycle site -> [pre-site, site, post-site, site-deploy]
-[DEBUG] === PROJECT BUILD PLAN ================================================
-[DEBUG] Project:       OGMDFIF:OGMDFIFSE:0.0.1
-[DEBUG] Dependencies (collect): [compile+runtime]
-[DEBUG] Dependencies (resolve): [compile, compile+runtime, runtime, test]
-[DEBUG] Repositories (dependencies): [tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/, default, releases)]
-[DEBUG] Repositories (plugins)     : [tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/, default, releases)]
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-clean-plugin:3.1.0:clean (default-clean)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <directory default-value="${project.build.directory}"/>
-  <excludeDefaultDirectories default-value="false">${maven.clean.excludeDefaultDirectories}</excludeDefaultDirectories>
-  <failOnError default-value="true">${maven.clean.failOnError}</failOnError>
-  <followSymLinks default-value="false">${maven.clean.followSymLinks}</followSymLinks>
-  <outputDirectory default-value="${project.build.outputDirectory}"/>
-  <reportDirectory default-value="${project.build.outputDirectory}"/>
-  <retryOnError default-value="true">${maven.clean.retryOnError}</retryOnError>
-  <skip default-value="false">${maven.clean.skip}</skip>
-  <testOutputDirectory default-value="${project.build.testOutputDirectory}"/>
-  <verbose>${maven.clean.verbose}</verbose>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-resources-plugin:3.2.0:resources (default-resources)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <addDefaultExcludes default-value="true"/>
-  <buildFilters default-value="${project.build.filters}"/>
-  <delimiters>
-    <delimiter>@</delimiter>
-  </delimiters>
-  <encoding default-value="${project.build.sourceEncoding}"/>
-  <escapeWindowsPaths default-value="true"/>
-  <fileNameFiltering default-value="false"/>
-  <includeEmptyDirs default-value="false"/>
-  <outputDirectory default-value="${project.build.outputDirectory}"/>
-  <overwrite default-value="false"/>
-  <project default-value="${project}"/>
-  <propertiesEncoding>UTF-8</propertiesEncoding>
-  <resources default-value="${project.resources}"/>
-  <session default-value="${session}"/>
-  <skip default-value="false">${maven.resources.skip}</skip>
-  <supportMultiLineFiltering default-value="false"/>
-  <useBuildFilters default-value="true"/>
-  <useDefaultDelimiters default-value="true">false</useDefaultDelimiters>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <basedir default-value="${basedir}"/>
-  <buildDirectory default-value="${project.build.directory}"/>
-  <compilePath default-value="${project.compileClasspathElements}"/>
-  <compileSourceRoots default-value="${project.compileSourceRoots}"/>
-  <compilerArgs>
-    <arg>-Xlint:unchecked</arg>
-    <arg>-Xlint:deprecation</arg>
-  </compilerArgs>
-  <compilerId default-value="javac">${maven.compiler.compilerId}</compilerId>
-  <compilerReuseStrategy default-value="${reuseCreated}">${maven.compiler.compilerReuseStrategy}</compilerReuseStrategy>
-  <compilerVersion>${maven.compiler.compilerVersion}</compilerVersion>
-  <createMissingPackageInfoClass default-value="true">${maven.compiler.createMissingPackageInfoClass}</createMissingPackageInfoClass>
-  <debug default-value="true">${maven.compiler.debug}</debug>
-  <debugFileName default-value="javac"/>
-  <debuglevel>${maven.compiler.debuglevel}</debuglevel>
-  <enablePreview default-value="false">${maven.compiler.enablePreview}</enablePreview>
-  <encoding default-value="${project.build.sourceEncoding}">UTF-8</encoding>
-  <executable>${maven.compiler.executable}</executable>
-  <failOnError default-value="true">${maven.compiler.failOnError}</failOnError>
-  <failOnWarning default-value="false">${maven.compiler.failOnWarning}</failOnWarning>
-  <forceJavacCompilerUse default-value="false">${maven.compiler.forceJavacCompilerUse}</forceJavacCompilerUse>
-  <fork default-value="false">true</fork>
-  <generatedSourcesDirectory default-value="${project.build.directory}/generated-sources/annotations"/>
-  <implicit>${maven.compiler.implicit}</implicit>
-  <maxmem>${maven.compiler.maxmem}</maxmem>
-  <meminitial>${maven.compiler.meminitial}</meminitial>
-  <mojoExecution default-value="${mojoExecution}"/>
-  <optimize default-value="false">${maven.compiler.optimize}</optimize>
-  <outputDirectory default-value="${project.build.outputDirectory}"/>
-  <parameters default-value="false">true</parameters>
-  <project default-value="${project}"/>
-  <projectArtifact default-value="${project.artifact}"/>
-  <release>${maven.compiler.release}</release>
-  <session default-value="${session}"/>
-  <showCompilationChanges default-value="false">${maven.compiler.showCompilationChanges}</showCompilationChanges>
-  <showDeprecation default-value="false">${maven.compiler.showDeprecation}</showDeprecation>
-  <showWarnings default-value="true">${maven.compiler.showWarnings}</showWarnings>
-  <skipMain>${maven.main.skip}</skipMain>
-  <skipMultiThreadWarning default-value="false">${maven.compiler.skipMultiThreadWarning}</skipMultiThreadWarning>
-  <source default-value="1.8">11</source>
-  <staleMillis default-value="0">${lastModGranularityMs}</staleMillis>
-  <target default-value="1.8">11</target>
-  <useIncrementalCompilation default-value="true">${maven.compiler.useIncrementalCompilation}</useIncrementalCompilation>
-  <verbose default-value="false">${maven.compiler.verbose}</verbose>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-resources-plugin:3.2.0:testResources (default-testResources)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <addDefaultExcludes default-value="true"/>
-  <buildFilters default-value="${project.build.filters}"/>
-  <delimiters>
-    <delimiter>@</delimiter>
-  </delimiters>
-  <encoding default-value="${project.build.sourceEncoding}"/>
-  <escapeWindowsPaths default-value="true"/>
-  <fileNameFiltering default-value="false"/>
-  <includeEmptyDirs default-value="false"/>
-  <outputDirectory default-value="${project.build.testOutputDirectory}"/>
-  <overwrite default-value="false"/>
-  <project default-value="${project}"/>
-  <propertiesEncoding>UTF-8</propertiesEncoding>
-  <resources default-value="${project.testResources}"/>
-  <session default-value="${session}"/>
-  <skip default-value="false">${maven.test.skip}</skip>
-  <supportMultiLineFiltering default-value="false"/>
-  <useBuildFilters default-value="true"/>
-  <useDefaultDelimiters default-value="true">false</useDefaultDelimiters>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-compiler-plugin:3.11.0:testCompile (default-testCompile)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <basedir default-value="${basedir}"/>
-  <buildDirectory default-value="${project.build.directory}"/>
-  <compileSourceRoots default-value="${project.testCompileSourceRoots}"/>
-  <compilerArgs>
-    <arg>-Xlint:unchecked</arg>
-    <arg>-Xlint:deprecation</arg>
-  </compilerArgs>
-  <compilerId default-value="javac">${maven.compiler.compilerId}</compilerId>
-  <compilerReuseStrategy default-value="${reuseCreated}">${maven.compiler.compilerReuseStrategy}</compilerReuseStrategy>
-  <compilerVersion>${maven.compiler.compilerVersion}</compilerVersion>
-  <createMissingPackageInfoClass default-value="true">${maven.compiler.createMissingPackageInfoClass}</createMissingPackageInfoClass>
-  <debug default-value="true">${maven.compiler.debug}</debug>
-  <debugFileName default-value="javac-test"/>
-  <debuglevel>${maven.compiler.debuglevel}</debuglevel>
-  <enablePreview default-value="false">${maven.compiler.enablePreview}</enablePreview>
-  <encoding default-value="${project.build.sourceEncoding}">UTF-8</encoding>
-  <executable>${maven.compiler.executable}</executable>
-  <failOnError default-value="true">${maven.compiler.failOnError}</failOnError>
-  <failOnWarning default-value="false">${maven.compiler.failOnWarning}</failOnWarning>
-  <forceJavacCompilerUse default-value="false">${maven.compiler.forceJavacCompilerUse}</forceJavacCompilerUse>
-  <fork default-value="false">true</fork>
-  <generatedTestSourcesDirectory default-value="${project.build.directory}/generated-test-sources/test-annotations"/>
-  <implicit>${maven.compiler.implicit}</implicit>
-  <maxmem>${maven.compiler.maxmem}</maxmem>
-  <meminitial>${maven.compiler.meminitial}</meminitial>
-  <mojoExecution default-value="${mojoExecution}"/>
-  <optimize default-value="false">${maven.compiler.optimize}</optimize>
-  <outputDirectory default-value="${project.build.testOutputDirectory}"/>
-  <parameters default-value="false">true</parameters>
-  <project default-value="${project}"/>
-  <release>${maven.compiler.release}</release>
-  <session default-value="${session}"/>
-  <showCompilationChanges default-value="false">${maven.compiler.showCompilationChanges}</showCompilationChanges>
-  <showDeprecation default-value="false">${maven.compiler.showDeprecation}</showDeprecation>
-  <showWarnings default-value="true">${maven.compiler.showWarnings}</showWarnings>
-  <skip>${maven.test.skip}</skip>
-  <skipMultiThreadWarning default-value="false">${maven.compiler.skipMultiThreadWarning}</skipMultiThreadWarning>
-  <source default-value="1.8">11</source>
-  <staleMillis default-value="0">${lastModGranularityMs}</staleMillis>
-  <target default-value="1.8">11</target>
-  <testPath default-value="${project.testClasspathElements}"/>
-  <testRelease>${maven.compiler.testRelease}</testRelease>
-  <testSource>${maven.compiler.testSource}</testSource>
-  <testTarget>${maven.compiler.testTarget}</testTarget>
-  <useIncrementalCompilation default-value="true">${maven.compiler.useIncrementalCompilation}</useIncrementalCompilation>
-  <useModulePath default-value="true"/>
-  <verbose default-value="false">${maven.compiler.verbose}</verbose>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-surefire-plugin:2.22.2:test (default-test)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <additionalClasspathElements>${maven.test.additionalClasspath}</additionalClasspathElements>
-  <argLine>${argLine}</argLine>
-  <basedir default-value="${basedir}"/>
-  <childDelegation default-value="false">${childDelegation}</childDelegation>
-  <classesDirectory default-value="${project.build.outputDirectory}"/>
-  <classpathDependencyExcludes>${maven.test.dependency.excludes}</classpathDependencyExcludes>
-  <debugForkedProcess>${maven.surefire.debug}</debugForkedProcess>
-  <dependenciesToScan>${dependenciesToScan}</dependenciesToScan>
-  <disableXmlReport default-value="false">${disableXmlReport}</disableXmlReport>
-  <enableAssertions default-value="true">${enableAssertions}</enableAssertions>
-  <encoding default-value="${project.reporting.outputEncoding}">${surefire.encoding}</encoding>
-  <excludedGroups>${excludedGroups}</excludedGroups>
-  <excludesFile>${surefire.excludesFile}</excludesFile>
-  <failIfNoSpecifiedTests>${surefire.failIfNoSpecifiedTests}</failIfNoSpecifiedTests>
-  <failIfNoTests>${failIfNoTests}</failIfNoTests>
-  <forkCount default-value="1">${forkCount}</forkCount>
-  <forkMode default-value="once">${forkMode}</forkMode>
-  <forkedProcessExitTimeoutInSeconds default-value="30">${surefire.exitTimeout}</forkedProcessExitTimeoutInSeconds>
-  <forkedProcessTimeoutInSeconds>${surefire.timeout}</forkedProcessTimeoutInSeconds>
-  <groups>${groups}</groups>
-  <includesFile>${surefire.includesFile}</includesFile>
-  <junitArtifactName default-value="junit:junit">${junitArtifactName}</junitArtifactName>
-  <junitPlatformArtifactName default-value="org.junit.platform:junit-platform-engine">${junitPlatformArtifactName}</junitPlatformArtifactName>
-  <jvm>${jvm}</jvm>
-  <localRepository default-value="${localRepository}"/>
-  <objectFactory>${objectFactory}</objectFactory>
-  <parallel>${parallel}</parallel>
-  <parallelMavenExecution default-value="${session.parallel}"/>
-  <parallelOptimized default-value="true">${parallelOptimized}</parallelOptimized>
-  <parallelTestsTimeoutForcedInSeconds>${surefire.parallel.forcedTimeout}</parallelTestsTimeoutForcedInSeconds>
-  <parallelTestsTimeoutInSeconds>${surefire.parallel.timeout}</parallelTestsTimeoutInSeconds>
-  <perCoreThreadCount default-value="true">${perCoreThreadCount}</perCoreThreadCount>
-  <pluginArtifactMap>${plugin.artifactMap}</pluginArtifactMap>
-  <pluginDescriptor default-value="${plugin}"/>
-  <printSummary default-value="true">${surefire.printSummary}</printSummary>
-  <projectArtifactMap>${project.artifactMap}</projectArtifactMap>
-  <projectBuildDirectory default-value="${project.build.directory}"/>
-  <redirectTestOutputToFile default-value="false">${maven.test.redirectTestOutputToFile}</redirectTestOutputToFile>
-  <remoteRepositories default-value="${project.pluginArtifactRepositories}"/>
-  <reportFormat default-value="brief">${surefire.reportFormat}</reportFormat>
-  <reportNameSuffix default-value="">${surefire.reportNameSuffix}</reportNameSuffix>
-  <reportsDirectory default-value="${project.build.directory}/surefire-reports"/>
-  <rerunFailingTestsCount default-value="0">${surefire.rerunFailingTestsCount}</rerunFailingTestsCount>
-  <reuseForks default-value="true">${reuseForks}</reuseForks>
-  <runOrder default-value="filesystem">${surefire.runOrder}</runOrder>
-  <shutdown default-value="testset">${surefire.shutdown}</shutdown>
-  <skip default-value="false">${maven.test.skip}</skip>
-  <skipAfterFailureCount default-value="0">${surefire.skipAfterFailureCount}</skipAfterFailureCount>
-  <skipExec>${maven.test.skip.exec}</skipExec>
-  <skipTests default-value="false">${skipTests}</skipTests>
-  <suiteXmlFiles>${surefire.suiteXmlFiles}</suiteXmlFiles>
-  <tempDir default-value="surefire">${tempDir}</tempDir>
-  <test>${test}</test>
-  <testClassesDirectory default-value="${project.build.testOutputDirectory}"/>
-  <testFailureIgnore default-value="false">${maven.test.failure.ignore}</testFailureIgnore>
-  <testNGArtifactName default-value="org.testng:testng">${testNGArtifactName}</testNGArtifactName>
-  <testSourceDirectory default-value="${project.build.testSourceDirectory}"/>
-  <threadCount>${threadCount}</threadCount>
-  <threadCountClasses default-value="0">${threadCountClasses}</threadCountClasses>
-  <threadCountMethods default-value="0">${threadCountMethods}</threadCountMethods>
-  <threadCountSuites default-value="0">${threadCountSuites}</threadCountSuites>
-  <trimStackTrace default-value="true">${trimStackTrace}</trimStackTrace>
-  <useFile default-value="true">${surefire.useFile}</useFile>
-  <useManifestOnlyJar default-value="true">${surefire.useManifestOnlyJar}</useManifestOnlyJar>
-  <useSystemClassLoader default-value="true">${surefire.useSystemClassLoader}</useSystemClassLoader>
-  <useUnlimitedThreads default-value="false">${useUnlimitedThreads}</useUnlimitedThreads>
-  <workingDirectory>${basedir}</workingDirectory>
-  <project default-value="${project}"/>
-  <session default-value="${session}"/>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-jar-plugin:3.2.0:jar (default-jar)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <archive>
-    <manifest>
-      <mainClass>${start-class}</mainClass>
-      <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
-    </manifest>
-  </archive>
-  <classesDirectory default-value="${project.build.outputDirectory}"/>
-  <finalName default-value="${project.build.finalName}"/>
-  <forceCreation default-value="false">${maven.jar.forceCreation}</forceCreation>
-  <outputDirectory default-value="${project.build.directory}"/>
-  <outputTimestamp default-value="${project.build.outputTimestamp}"/>
-  <project default-value="${project}"/>
-  <session default-value="${session}"/>
-  <skipIfEmpty default-value="false"/>
-  <useDefaultManifestFile default-value="false">${jar.useDefaultManifestFile}</useDefaultManifestFile>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.springframework.boot:spring-boot-maven-plugin:2.4.3:repackage (repackage)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <attach default-value="true"/>
-  <excludeDevtools default-value="true">${spring-boot.repackage.excludeDevtools}</excludeDevtools>
-  <excludeGroupIds default-value="">${spring-boot.excludeGroupIds}</excludeGroupIds>
-  <excludes>${spring-boot.excludes}</excludes>
-  <executable default-value="false"/>
-  <finalName default-value="${project.build.finalName}"/>
-  <includeSystemScope default-value="false"/>
-  <includes>${spring-boot.includes}</includes>
-  <layout>${spring-boot.repackage.layout}</layout>
-  <mainClass>${start-class}</mainClass>
-  <outputDirectory default-value="${project.build.directory}"/>
-  <outputTimestamp default-value="${project.build.outputTimestamp}"/>
-  <project default-value="${project}"/>
-  <session default-value="${session}"/>
-  <skip default-value="false">${spring-boot.repackage.skip}</skip>
-</configuration>
-[DEBUG] -----------------------------------------------------------------------
-[DEBUG] Goal:          org.apache.maven.plugins:maven-install-plugin:2.5.2:install (default-install)
-[DEBUG] Style:         Regular
-[DEBUG] Configuration: <?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <artifact default-value="${project.artifact}"/>
-  <attachedArtifacts default-value="${project.attachedArtifacts}"/>
-  <createChecksum default-value="false">${createChecksum}</createChecksum>
-  <installAtEnd default-value="false">${installAtEnd}</installAtEnd>
-  <localRepository>${localRepository}</localRepository>
-  <packaging default-value="${project.packaging}"/>
-  <pomFile default-value="${project.file}"/>
-  <project default-value="${project}"/>
-  <reactorProjects default-value="${reactorProjects}"/>
-  <skip default-value="false">${maven.install.skip}</skip>
-  <updateReleaseInfo default-value="false">${updateReleaseInfo}</updateReleaseInfo>
-</configuration>
-[DEBUG] =======================================================================
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for jboss-public-repository (https://repository.jboss.org/nexus/content/groups/public).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for spring-libs-release (https://repo.spring.io/libs-release).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for spring-libs-snapshot (https://repo.spring.io/libs-snapshot).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for ow2-snapshot (http://repository.ow2.org/nexus/content/repositories/snapshots).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for vaadin-snapshots (http://oss.sonatype.org/content/repositories/vaadin-snapshots/).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for vaadin-releases (http://oss.sonatype.org/content/repositories/vaadin-releases/).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for jvnet-nexus-snapshots (https://maven.java.net/content/repositories/snapshots).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for atlas-default-group (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for central (http://sapsbld/maven2).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for tcmb (http://sapsbld/maven2-tcmb).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for maven2-repository.dev.java.net (http://download.java.net/maven/2/).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for apache.snapshots (http://people.apache.org/repo/m2-snapshot-repository).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for apache.snapshots.https (https://repository.apache.org/content/repositories/snapshots).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for apache.releases.https (https://repository.apache.org/content/repositories/releases).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for jboss.org (https://repository.jboss.org/nexus/content/repositories/thirdparty-releases/).
-[DEBUG] Dependency collection stats: {ConflictMarker.analyzeTime=2013800, ConflictMarker.markTime=557800, ConflictMarker.nodeCount=959, ConflictIdSorter.graphTime=1195400, ConflictIdSorter.topsortTime=771000, ConflictIdSorter.conflictIdCount=278, ConflictIdSorter.conflictIdCycleCount=0, ConflictResolver.totalTime=23228600, ConflictResolver.conflictItemCount=704, DefaultDependencyCollector.collectTime=805888400, DefaultDependencyCollector.transformTime=29367100}
-[DEBUG] OGMDFIF:OGMDFIFSE:jar:0.0.1
-[DEBUG]    org.springframework.boot:spring-boot-starter-data-jpa:jar:2.4.3:compile
-[DEBUG]       org.springframework.boot:spring-boot-starter-aop:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          org.springframework:spring-aop:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]          org.aspectj:aspectjweaver:jar:1.9.6:compile (version managed from 1.9.6)
-[DEBUG]       org.springframework.boot:spring-boot-starter-jdbc:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          com.zaxxer:HikariCP:jar:3.4.5:compile (version managed from 3.4.5)
-[DEBUG]       jakarta.transaction:jakarta.transaction-api:jar:1.3.3:compile (version managed from 1.3.3)
-[DEBUG]       jakarta.persistence:jakarta.persistence-api:jar:2.2.3:compile (version managed from 2.2.3)
-[DEBUG]       org.hibernate:hibernate-core:jar:5.4.28.Final:compile (version managed from 5.4.28.Final)
-[DEBUG]          org.jboss.logging:jboss-logging:jar:3.4.1.Final:compile (version managed from 3.4.1.Final)
-[DEBUG]          org.javassist:javassist:jar:3.27.0-GA:compile
-[DEBUG]          antlr:antlr:jar:2.7.7:compile (version managed from 2.7.7)
-[DEBUG]          org.jboss:jandex:jar:2.2.3.Final:compile
-[DEBUG]          org.dom4j:dom4j:jar:2.1.3:compile
-[DEBUG]          org.hibernate.common:hibernate-commons-annotations:jar:5.1.2.Final:compile
-[DEBUG]          org.glassfish.jaxb:jaxb-runtime:jar:2.3.3:compile (version managed from 2.3.1)
-[DEBUG]             org.glassfish.jaxb:txw2:jar:2.3.3:compile (version managed from 2.3.3)
-[DEBUG]             com.sun.istack:istack-commons-runtime:jar:3.0.11:compile
-[DEBUG]       org.springframework.data:spring-data-jpa:jar:2.4.5:compile (version managed from 2.4.5)
-[DEBUG]          org.springframework.data:spring-data-commons:jar:2.4.5:compile (version managed from 2.4.5)
-[DEBUG]          org.springframework:spring-orm:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]          org.springframework:spring-tx:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]          org.springframework:spring-beans:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]       org.springframework:spring-aspects:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]    org.springframework.boot:spring-boot-starter-web:jar:2.4.3:compile
-[DEBUG]       org.springframework.boot:spring-boot-starter:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          org.yaml:snakeyaml:jar:1.27:compile (version managed from 1.27)
-[DEBUG]       org.springframework.boot:spring-boot-starter-json:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          com.fasterxml.jackson.datatype:jackson-datatype-jdk8:jar:2.11.4:compile (version managed from 2.11.4)
-[DEBUG]          com.fasterxml.jackson.module:jackson-module-parameter-names:jar:2.11.4:compile (version managed from 2.11.4)
-[DEBUG]       org.springframework.boot:spring-boot-starter-tomcat:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          org.apache.tomcat.embed:tomcat-embed-core:jar:9.0.43:compile (version managed from 9.0.43)
-[DEBUG]          org.apache.tomcat.embed:tomcat-embed-websocket:jar:9.0.43:compile (version managed from 9.0.43)
-[DEBUG]       org.springframework:spring-web:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]       org.springframework:spring-webmvc:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]          org.springframework:spring-expression:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]    org.springframework.boot:spring-boot-starter-validation:jar:2.4.3:compile
-[DEBUG]       org.glassfish:jakarta.el:jar:3.0.3:compile (version managed from 3.0.3)
-[DEBUG]       org.hibernate.validator:hibernate-validator:jar:6.1.7.Final:compile (version managed from 6.1.7.Final)
-[DEBUG]          jakarta.validation:jakarta.validation-api:jar:2.0.2:compile (version managed from 2.0.2)
-[DEBUG]    org.springframework.boot:spring-boot-starter-actuator:jar:2.4.3:compile
-[DEBUG]       org.springframework.boot:spring-boot-actuator-autoconfigure:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          org.springframework.boot:spring-boot-actuator:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]       io.micrometer:micrometer-core:jar:1.6.4:compile (version managed from 1.6.4)
-[DEBUG]          org.hdrhistogram:HdrHistogram:jar:2.1.12:compile
-[DEBUG]          org.latencyutils:LatencyUtils:jar:2.0.3:runtime
-[DEBUG]    org.apache.pdfbox:pdfbox:jar:2.0.22:compile
-[DEBUG]       org.apache.pdfbox:fontbox:jar:2.0.22:compile
-[DEBUG]    org.springframework.boot:spring-boot-starter-mail:jar:2.4.3:compile
-[DEBUG]       org.springframework:spring-context-support:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]       com.sun.mail:jakarta.mail:jar:1.6.5:compile (version managed from 1.6.5)
-[DEBUG]          com.sun.activation:jakarta.activation:jar:1.2.2:compile (version managed from 1.2.1)
-[DEBUG]    org.postgresql:postgresql:jar:42.2.18:runtime
-[DEBUG]       org.checkerframework:checker-qual:jar:3.5.0:compile
-[DEBUG]    org.apache.commons:commons-lang3:jar:3.11:compile
-[DEBUG]    io.springfox:springfox-swagger2:jar:2.9.2:compile
-[DEBUG]       io.swagger:swagger-annotations:jar:1.5.20:compile
-[DEBUG]       io.swagger:swagger-models:jar:1.5.20:compile
-[DEBUG]       io.springfox:springfox-spi:jar:2.9.2:compile
-[DEBUG]          io.springfox:springfox-core:jar:2.9.2:compile
-[DEBUG]       io.springfox:springfox-schema:jar:2.9.2:compile
-[DEBUG]       io.springfox:springfox-swagger-common:jar:2.9.2:compile
-[DEBUG]       io.springfox:springfox-spring-web:jar:2.9.2:compile
-[DEBUG]       com.google.guava:guava:jar:20.0:compile
-[DEBUG]       com.fasterxml:classmate:jar:1.5.1:compile (version managed from 1.4.0)
-[DEBUG]       org.slf4j:slf4j-api:jar:1.7.30:compile (version managed from 1.7.25)
-[DEBUG]       org.springframework.plugin:spring-plugin-core:jar:1.2.0.RELEASE:compile
-[DEBUG]       org.springframework.plugin:spring-plugin-metadata:jar:1.2.0.RELEASE:compile
-[DEBUG]       org.mapstruct:mapstruct:jar:1.2.0.Final:compile
-[DEBUG]    BIEPLTF:BIEPLTFMD-SECURITY:jar:1.0.0-18:compile
-[DEBUG]       org.springframework.boot:spring-boot-starter-security:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          org.springframework.security:spring-security-config:jar:5.4.5:compile (version managed from 5.4.5)
-[DEBUG]          org.springframework.security:spring-security-web:jar:5.4.5:compile (version managed from 5.4.5)
-[DEBUG]       commons-codec:commons-codec:jar:1.15:compile (version managed from 1.15)
-[DEBUG]    BIEPLTF:BIEPLTFMD-LOG:jar:1.0.0-8:compile
-[DEBUG]       org.springframework.boot:spring-boot-starter-logging:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          ch.qos.logback:logback-classic:jar:1.2.3:compile (version managed from 1.2.3)
-[DEBUG]             ch.qos.logback:logback-core:jar:1.2.3:compile (version managed from 1.2.3)
-[DEBUG]          org.apache.logging.log4j:log4j-to-slf4j:jar:2.13.3:compile (version managed from 2.13.3)
-[DEBUG]          org.slf4j:jul-to-slf4j:jar:1.7.30:compile (version managed from 1.7.30)
-[DEBUG]    BIEPLTF:BIEPLTFMD-DBUTIL243:jar:1.0.0-3:compile
-[DEBUG]    BIEPLTF:BIEPLTFMD-EDSUTIL:jar:1.0.0-16:compile
-[DEBUG]       com.auth0:java-jwt:jar:3.10.1:compile
-[DEBUG]    BIEPLTF:BIEPLTFMD-REACTIVEEDSUTIL:jar:1.0.0-5:compile
-[DEBUG]    org.springframework.boot:spring-boot-starter-webflux:jar:2.4.3:compile
-[DEBUG]       org.springframework.boot:spring-boot-starter-reactor-netty:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]          io.projectreactor.netty:reactor-netty-http:jar:1.0.4:compile (version managed from 1.0.4)
-[DEBUG]             io.netty:netty-codec-http:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-common:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-buffer:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-transport:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-codec:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-handler:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]             io.netty:netty-codec-http2:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]             io.netty:netty-resolver-dns:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-resolver:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-codec-dns:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]             io.netty:netty-resolver-dns-native-macos:jar:osx-x86_64:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                io.netty:netty-transport-native-unix-common:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]             io.netty:netty-transport-native-epoll:jar:linux-x86_64:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]             io.projectreactor.netty:reactor-netty-core:jar:1.0.4:compile (version managed from 1.0.4)
-[DEBUG]                io.netty:netty-handler-proxy:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]                   io.netty:netty-codec-socks:jar:4.1.59.Final:compile (version managed from 4.1.59.Final)
-[DEBUG]       org.springframework:spring-webflux:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]          io.projectreactor:reactor-core:jar:3.4.3:compile (version managed from 3.4.3)
-[DEBUG]             org.reactivestreams:reactive-streams:jar:1.0.3:compile (version managed from 1.0.3)
-[DEBUG]    BIEPLTF:BIEPLTFMD-AUDIT:jar:1.0.0-9:compile
-[DEBUG]       org.apache.commons:commons-collections4:jar:4.4:compile
-[DEBUG]    BIEPLTF:BIEPLTFMD-WEB:jar:1.0.0-2:compile
-[DEBUG]    org.springframework.boot:spring-boot-starter-cache:jar:2.4.3:compile
-[DEBUG]    org.springframework.boot:spring-boot-starter-test:jar:2.4.3:test
-[DEBUG]       org.springframework.boot:spring-boot-test:jar:2.4.3:test (version managed from 2.4.3)
-[DEBUG]       org.springframework.boot:spring-boot-test-autoconfigure:jar:2.4.3:test (version managed from 2.4.3)
-[DEBUG]       com.jayway.jsonpath:json-path:jar:2.4.0:test (version managed from 2.4.0)
-[DEBUG]          net.minidev:json-smart:jar:2.3:test (version managed from 2.3)
-[DEBUG]             net.minidev:accessors-smart:jar:1.2:test
-[DEBUG]                org.ow2.asm:asm:jar:5.0.4:test
-[DEBUG]       jakarta.xml.bind:jakarta.xml.bind-api:jar:2.3.3:compile (version managed from 2.3.3)
-[DEBUG]          jakarta.activation:jakarta.activation-api:jar:1.2.2:compile (version managed from 1.2.2)
-[DEBUG]       org.assertj:assertj-core:jar:3.18.1:test (version managed from 3.18.1)
-[DEBUG]       org.hamcrest:hamcrest:jar:2.2:test (version managed from 2.2)
-[DEBUG]       org.junit.jupiter:junit-jupiter:jar:5.7.1:test (version managed from 5.7.1)
-[DEBUG]          org.junit.jupiter:junit-jupiter-api:jar:5.7.1:test (version managed from 5.7.1)
-[DEBUG]             org.opentest4j:opentest4j:jar:1.2.0:test
-[DEBUG]             org.junit.platform:junit-platform-commons:jar:1.7.1:test (version managed from 1.7.1)
-[DEBUG]          org.junit.jupiter:junit-jupiter-params:jar:5.7.1:test (version managed from 5.7.1)
-[DEBUG]          org.junit.jupiter:junit-jupiter-engine:jar:5.7.1:test (version managed from 5.7.1)
-[DEBUG]       org.mockito:mockito-junit-jupiter:jar:3.6.28:test (version managed from 3.6.28)
-[DEBUG]       org.skyscreamer:jsonassert:jar:1.5.0:test (version managed from 1.5.0)
-[DEBUG]       org.springframework:spring-core:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]          org.springframework:spring-jcl:jar:5.3.4:compile (version managed from 5.3.4)
-[DEBUG]       org.springframework:spring-test:jar:5.3.4:test (version managed from 5.3.4)
-[DEBUG]       org.xmlunit:xmlunit-core:jar:2.7.0:test (version managed from 2.7.0)
-[DEBUG]    com.h2database:h2:jar:1.4.200:test
-[DEBUG]    org.junit.platform:junit-platform-runner:jar:1.7.1:test
-[DEBUG]       junit:junit:jar:4.13.2:test (version managed from 4.13)
-[DEBUG]          org.hamcrest:hamcrest-core:jar:2.2:test (version managed from 1.3)
-[DEBUG]       org.apiguardian:apiguardian-api:jar:1.1.0:test
-[DEBUG]       org.junit.platform:junit-platform-launcher:jar:1.7.1:test (version managed from 1.7.1)
-[DEBUG]          org.junit.platform:junit-platform-engine:jar:1.7.1:test (version managed from 1.7.1)
-[DEBUG]       org.junit.platform:junit-platform-suite-api:jar:1.7.1:test (version managed from 1.7.1)
-[DEBUG]    org.springframework.boot:spring-boot-devtools:jar:2.4.3:compile (optional)
-[DEBUG]       org.springframework.boot:spring-boot:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]       org.springframework.boot:spring-boot-autoconfigure:jar:2.4.3:compile (version managed from 2.4.3)
-[DEBUG]    javax.mail:mail:jar:1.4.7:compile
-[DEBUG]       javax.activation:activation:jar:1.1:compile
-[DEBUG]    com.vaadin.external.google:android-json:jar:0.0.20131108.vaadin1:compile
-[DEBUG]    com.google.code.gson:gson:jar:2.8.6:compile
-[DEBUG]    org.mockito:mockito-inline:jar:3.8.0:test
-[DEBUG]    org.apache.httpcomponents:httpclient:jar:4.5.13:compile (exclusions managed from [commons-logging:commons-logging:*:*])
-[DEBUG]       org.apache.httpcomponents:httpcore:jar:4.4.14:compile (version managed from 4.4.13)
-[DEBUG]    SUBMUHB:SUBMUHBMD-PIKUR:jar:2.7.0-7:compile
-[DEBUG]       org.codehaus.jackson:jackson-core-asl:jar:1.9.9:compile
-[DEBUG]       org.codehaus.jackson:jackson-mapper-asl:jar:1.9.9:compile
-[DEBUG]       tcmb.platform:security:jar:R2_9_18:compile
-[DEBUG]          org.springframework.security:spring-security-core:jar:5.4.5:compile (version managed from 2.0.8.RELEASE)
-[DEBUG]          org.springframework.security:spring-security-core-tiger:jar:2.0.8.RELEASE:compile
-[DEBUG]          org.springframework.security:spring-security-taglibs:jar:5.4.5:compile (version managed from 2.0.8.RELEASE)
-[DEBUG]             org.springframework.security:spring-security-acl:jar:5.4.5:compile (version managed from 5.4.5)
-[DEBUG]          com.sun.identity:openssoclientsdk:jar:tcmb.8.0_patched:compile
-[DEBUG]       tcmb.platform:util:jar:R2_9_16:compile
-[DEBUG]          com.ibm.icu:icu4j:jar:52.1:compile
-[DEBUG]          tcmb.platform:printer:jar:R2_9_0:compile
-[DEBUG]          com.cyberark:javapasswordsdk:jar:9.95.0.0:compile
-[DEBUG]       com.fasterxml.jackson.datatype:jackson-datatype-jsr310:jar:2.11.4:compile (version managed from 2.13.4)
-[DEBUG]       commons-lang:commons-lang:jar:2.6:compile
-[DEBUG]    tcmb.platform:xml:jar:R2_9_0:provided
-[DEBUG]       jaxen:jaxen:jar:1.2.0:compile (version managed from 1.1.4)
-[DEBUG]       org.apache.xmlbeans:xmlbeans-xpath:jar:2.3.0:provided
-[DEBUG]    commons-logging:commons-logging:jar:1.1:compile
-[DEBUG]       log4j:log4j:jar:1.2.12:compile
-[DEBUG]       logkit:logkit:jar:1.0.1:compile
-[DEBUG]       avalon-framework:avalon-framework:jar:4.1.3:compile
-[DEBUG]       javax.servlet:servlet-api:jar:2.3:compile
-[DEBUG]    com.fasterxml:jackson-module-hibernate:jar:1.9.1:compile
-[DEBUG]    com.fasterxml.jackson.core:jackson-databind:jar:2.13.4:compile
-[DEBUG]    com.fasterxml.jackson.core:jackson-core:jar:2.13.4:compile
-[DEBUG]    com.fasterxml.jackson.core:jackson-annotations:jar:2.13.4:compile
-[DEBUG]    com.google.code.bean-matchers:bean-matchers:jar:0.13:test
-[DEBUG]    MGMOSYP:MGMOSYPMD-MODEL:jar:1.3.0-16:compile
-[DEBUG]    org.apache.poi:poi-ooxml:jar:5.2.3:compile
-[DEBUG]       org.apache.poi:poi:jar:5.2.3:compile
-[DEBUG]          org.apache.commons:commons-math3:jar:3.6.1:compile
-[DEBUG]          com.zaxxer:SparseBitSet:jar:1.2:compile
-[DEBUG]       org.apache.poi:poi-ooxml-lite:jar:5.2.3:compile
-[DEBUG]       org.apache.commons:commons-compress:jar:1.21:compile
-[DEBUG]       commons-io:commons-io:jar:2.11.0:compile
-[DEBUG]       com.github.virtuald:curvesapi:jar:1.07:compile
-[DEBUG]       org.apache.logging.log4j:log4j-api:jar:2.13.3:compile (version managed from 2.18.0)
-[DEBUG]    org.docx4j:docx4j:jar:6.1.2:compile
-[DEBUG]       org.plutext:jaxb-svg11:jar:1.0.2:compile
-[DEBUG]       net.engio:mbassador:jar:1.2.4.2:compile
-[DEBUG]       org.slf4j:jcl-over-slf4j:jar:1.7.30:compile (version managed from 1.7.25)
-[DEBUG]       org.slf4j:slf4j-log4j12:jar:1.7.30:compile (version managed from 1.7.25)
-[DEBUG]       org.apache.xmlgraphics:xmlgraphics-commons:jar:2.3:compile
-[DEBUG]       org.apache.avalon.framework:avalon-framework-api:jar:4.3.1:compile
-[DEBUG]       org.apache.avalon.framework:avalon-framework-impl:jar:4.3.1:compile
-[DEBUG]       xalan:xalan:jar:2.7.2:compile
-[DEBUG]          xalan:serializer:jar:2.7.2:compile
-[DEBUG]       net.arnx:wmf2svg:jar:0.9.8:compile
-[DEBUG]       org.antlr:antlr-runtime:jar:3.5.2:compile
-[DEBUG]       org.antlr:stringtemplate:jar:3.2.1:compile
-[DEBUG]       com.thedeanda:lorem:jar:2.1:compile
-[DEBUG]    org.docx4j:docx4j-export-fo:jar:6.1.0:compile
-[DEBUG]       org.plutext:jaxb-xslfo:jar:1.0.1:compile
-[DEBUG]    org.apache.xmlgraphics:fop:jar:2.6:compile
-[DEBUG]       org.apache.xmlgraphics:fop-util:jar:2.6:compile
-[DEBUG]       org.apache.xmlgraphics:fop-events:jar:2.6:compile
-[DEBUG]          com.thoughtworks.qdox:qdox:jar:1.12:compile
-[DEBUG]       org.apache.xmlgraphics:fop-core:jar:2.6:compile
-[DEBUG]          org.apache.xmlgraphics:batik-anim:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-css:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-dom:jar:1.14:compile
-[DEBUG]                xml-apis:xml-apis:jar:1.4.01:compile
-[DEBUG]             org.apache.xmlgraphics:batik-ext:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-parser:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-shared-resources:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-svg-dom:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-util:jar:1.14:compile
-[DEBUG]                org.apache.xmlgraphics:batik-constants:jar:1.14:compile
-[DEBUG]                org.apache.xmlgraphics:batik-i18n:jar:1.14:compile
-[DEBUG]             xml-apis:xml-apis-ext:jar:1.3.04:compile
-[DEBUG]          org.apache.xmlgraphics:batik-awt-util:jar:1.14:compile
-[DEBUG]          org.apache.xmlgraphics:batik-bridge:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-script:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-xml:jar:1.14:compile
-[DEBUG]          org.apache.xmlgraphics:batik-extension:jar:1.14:compile
-[DEBUG]          org.apache.xmlgraphics:batik-gvt:jar:1.14:compile
-[DEBUG]          org.apache.xmlgraphics:batik-transcoder:jar:1.14:compile
-[DEBUG]             org.apache.xmlgraphics:batik-svggen:jar:1.14:compile
-[DEBUG]    org.apache.xmlbeans:xmlbeans:jar:5.1.1:compile
-[DEBUG]    org.apache.poi:ooxml-schemas:jar:1.4:compile
-[DEBUG]    com.itextpdf:itextpdf:jar:5.5.0:compile
-[DEBUG]    com.sun.xml.ws:jaxws-ri:pom:2.3.3:compile
-[DEBUG]       com.sun.xml.ws:jaxws-rt:jar:2.3.3:compile
-[DEBUG]          com.sun.xml.ws:policy:jar:2.7.10:compile
-[DEBUG]          com.sun.xml.bind:jaxb-impl:jar:2.3.3:compile
-[DEBUG]          org.glassfish.ha:ha-api:jar:3.1.12:compile
-[DEBUG]          org.glassfish.external:management-api:jar:3.2.2:compile
-[DEBUG]          org.glassfish.gmbal:gmbal:jar:4.0.1:compile
-[DEBUG]          org.glassfish.pfl:pfl-tf:jar:4.1.0:compile
-[DEBUG]          org.glassfish.pfl:pfl-basic:jar:4.1.0:compile
-[DEBUG]          org.jvnet.staxex:stax-ex:jar:1.8.3:compile
-[DEBUG]          com.sun.xml.stream.buffer:streambuffer:jar:1.5.9:compile
-[DEBUG]          org.jvnet.mimepull:mimepull:jar:1.9.13:compile (version managed from 1.9.13)
-[DEBUG]          com.sun.xml.fastinfoset:FastInfoset:jar:1.2.18:compile
-[DEBUG]          com.sun.xml.messaging.saaj:saaj-impl:jar:1.5.2:runtime (version managed from 1.5.2)
-[DEBUG]          com.fasterxml.woodstox:woodstox-core:jar:5.1.0:runtime
-[DEBUG]          org.codehaus.woodstox:stax2-api:jar:4.1:runtime
-[DEBUG]       com.sun.xml.ws:jaxws-tools:jar:2.3.3:compile
-[DEBUG]          com.sun.xml.bind:jaxb-xjc:jar:2.3.3:compile
-[DEBUG]          com.sun.xml.bind:jaxb-jxc:jar:2.3.3:compile
-[DEBUG]       com.sun.xml.ws:jaxws-eclipselink-plugin:jar:2.3.3:compile
-[DEBUG]          org.eclipse.persistence:org.eclipse.persistence.moxy:jar:2.7.6:compile
-[DEBUG]             org.eclipse.persistence:org.eclipse.persistence.core:jar:2.7.6:compile
-[DEBUG]                org.eclipse.persistence:org.eclipse.persistence.asm:jar:2.7.6:compile
-[DEBUG]       com.sun.xml.ws:sdo-eclipselink-plugin:jar:2.3.3:compile
-[DEBUG]          org.eclipse.persistence:org.eclipse.persistence.sdo:jar:2.7.6:compile
-[DEBUG]          org.eclipse.persistence:commonj.sdo:jar:2.1.1:compile
-[DEBUG]       com.sun.xml.ws:release-documentation:zip:docbook:2.3.3:compile
-[DEBUG]       com.sun.xml.ws:samples:zip:2.3.3:compile
-[DEBUG]       jakarta.xml.ws:jakarta.xml.ws-api:jar:2.3.3:compile (version managed from 2.3.3)
-[DEBUG]       jakarta.xml.soap:jakarta.xml.soap-api:jar:1.4.2:compile (version managed from 1.4.2)
-[DEBUG]       jakarta.jws:jakarta.jws-api:jar:2.1.0:compile
-[DEBUG]       jakarta.annotation:jakarta.annotation-api:jar:1.3.5:compile (version managed from 1.3.5)
-[DEBUG]    org.mockito:mockito-core:jar:3.6.28:compile
-[DEBUG]       net.bytebuddy:byte-buddy:jar:1.10.20:compile (version managed from 1.10.18)
-[DEBUG]       net.bytebuddy:byte-buddy-agent:jar:1.10.20:compile (version managed from 1.10.18)
-[DEBUG]       org.objenesis:objenesis:jar:3.1:compile
-[DEBUG]    net.javacrumbs.shedlock:shedlock-spring:jar:4.44.0:compile
-[DEBUG]       net.javacrumbs.shedlock:shedlock-core:jar:4.44.0:compile
-[DEBUG]       org.springframework:spring-context:jar:5.3.4:compile (version managed from 5.3.22)
-[DEBUG]    net.javacrumbs.shedlock:shedlock-provider-jdbc-template:jar:4.44.0:compile
-[DEBUG]       org.springframework:spring-jdbc:jar:5.3.4:compile (version managed from 5.3.22)
-[DEBUG]    com.github.ben-manes.caffeine:caffeine:jar:3.1.8:compile
-[DEBUG]       com.google.errorprone:error_prone_annotations:jar:2.21.1:compile
-[DEBUG]    org.projectlombok:lombok:jar:1.18.28:compile
-[INFO] 
-[INFO] --- maven-clean-plugin:3.1.0:clean (default-clean) @ OGMDFIFSE ---
-[DEBUG] Dependency collection stats: {ConflictMarker.analyzeTime=39500, ConflictMarker.markTime=11900, ConflictMarker.nodeCount=14, ConflictIdSorter.graphTime=13200, ConflictIdSorter.topsortTime=8100, ConflictIdSorter.conflictIdCount=12, ConflictIdSorter.conflictIdCycleCount=0, ConflictResolver.totalTime=108300, ConflictResolver.conflictItemCount=14, DefaultDependencyCollector.collectTime=35811700, DefaultDependencyCollector.transformTime=257200}
-[DEBUG] org.apache.maven.plugins:maven-clean-plugin:jar:3.1.0
-[DEBUG]    org.apache.maven:maven-plugin-api:jar:3.0:compile
-[DEBUG]       org.apache.maven:maven-model:jar:3.0:compile
-[DEBUG]          org.codehaus.plexus:plexus-utils:jar:2.0.4:compile
-[DEBUG]       org.apache.maven:maven-artifact:jar:3.0:compile
-[DEBUG]       org.sonatype.sisu:sisu-inject-plexus:jar:1.4.2:compile
-[DEBUG]          org.codehaus.plexus:plexus-component-annotations:jar:1.7.1:compile (version managed from default)
-[DEBUG]          org.codehaus.plexus:plexus-classworlds:jar:2.2.3:compile
-[DEBUG]          org.sonatype.sisu:sisu-inject-bean:jar:1.4.2:compile
-[DEBUG]             org.sonatype.sisu:sisu-guice:jar:noaop:2.1.7:compile
-[DEBUG]    org.apache.maven.shared:maven-shared-utils:jar:3.2.1:compile
-[DEBUG]       commons-io:commons-io:jar:2.5:compile
-[DEBUG] Created new class realm plugin>org.apache.maven.plugins:maven-clean-plugin:3.1.0
-[DEBUG] Importing foreign packages into class realm plugin>org.apache.maven.plugins:maven-clean-plugin:3.1.0
-[DEBUG]   Imported:  < maven.api
-[DEBUG] Populating class realm plugin>org.apache.maven.plugins:maven-clean-plugin:3.1.0
-[DEBUG]   Included: org.apache.maven.plugins:maven-clean-plugin:jar:3.1.0
-[DEBUG]   Included: org.codehaus.plexus:plexus-utils:jar:2.0.4
-[DEBUG]   Included: org.codehaus.plexus:plexus-component-annotations:jar:1.7.1
-[DEBUG]   Included: org.sonatype.sisu:sisu-inject-bean:jar:1.4.2
-[DEBUG]   Included: org.sonatype.sisu:sisu-guice:jar:noaop:2.1.7
-[DEBUG]   Included: org.apache.maven.shared:maven-shared-utils:jar:3.2.1
-[DEBUG]   Included: commons-io:commons-io:jar:2.5
-[DEBUG] Configuring mojo org.apache.maven.plugins:maven-clean-plugin:3.1.0:clean from plugin realm ClassRealm[plugin>org.apache.maven.plugins:maven-clean-plugin:3.1.0, parent: jdk.internal.loader.ClassLoaders$AppClassLoader@6ed3ef1]
-[DEBUG] Configuring mojo 'org.apache.maven.plugins:maven-clean-plugin:3.1.0:clean' with basic configurator -->
-[DEBUG]   (f) directory = C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target
-[DEBUG]   (f) excludeDefaultDirectories = false
-[DEBUG]   (f) failOnError = true
-[DEBUG]   (f) followSymLinks = false
-[DEBUG]   (f) outputDirectory = C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes
-[DEBUG]   (f) reportDirectory = C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes
-[DEBUG]   (f) retryOnError = true
-[DEBUG]   (f) skip = false
-[DEBUG]   (f) testOutputDirectory = C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\test-classes
-[DEBUG] -- end configuration --
-[INFO] Deleting C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\org.codehaus.plexus.compiler.javac.JavacCompiler17547874601847927627arguments
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\maven-status\maven-compiler-plugin\compile\default-compile\inputFiles.lst
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\maven-status\maven-compiler-plugin\compile\default-compile\createdFiles.lst
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\maven-status\maven-compiler-plugin\compile\default-compile
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\maven-status\maven-compiler-plugin\compile
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\maven-status\maven-compiler-plugin
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\maven-status
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\javac.bat
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\generated-sources\annotations
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\generated-sources
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\wsdl\BorcuYokturWS.xsd
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\wsdl\BorcuYokturWS.wsdl
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\wsdl
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\tahakkukcetveli\dfif2.xsd
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\tahakkukcetveli
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\static\banner.txt
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\static
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\spring\mailSenderBeans.xml
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\spring
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\schema_pd.sql
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\schema.sql
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONTALEPSAOSLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONTALEPODEMELST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONTALEPICMALLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONISTEMELST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVBEKLEYENKARARLAR.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PIKURDETAYLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.KARARLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.IHRTAKIPHESAPLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.IHRBIRLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.IHRACATCILST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.EBIMONAYLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIZIMMETMEKTUP.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIODEMELST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCINAKITODEMEMEKTUP.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCINAKITMEKTUP.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIDEVIRMEKTUP.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIDAVETMEKTUP.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HESAPSIZIHRACATCILST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDIS_DEVIR.docx
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISZIMMETLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISBELGESI2.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISBELGESI1.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\GENELODEMELST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\DEVIRLST.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\DAVET_MEKTUP.docx
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\BORCSUZIHRACATCIDAVETMEKTUP.xml
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\BILGIFORMULST.xml
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\pattern\turkishPatternTable
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\pattern
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts\times.ttf
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts\DejaVuSans.ttf
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts\arial.ttf
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\_.cs.com.tr.pem
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\_.cs.com.tr.crt
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\keystore.p12
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\cs-com-tr.pem
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\client-truststore.jks
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\client-keystore.jks
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\certTB.pem
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\cacerts
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\application.properties
-[INFO] Deleting file C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\application-local.properties
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes
-[INFO] Deleting directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target
-[DEBUG] Skipping non-existing directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes
-[DEBUG] Skipping non-existing directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\test-classes
-[DEBUG] Skipping non-existing directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes
-[INFO] 
-[INFO] --- maven-resources-plugin:3.2.0:resources (default-resources) @ OGMDFIFSE ---
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for repository.jboss.org (http://repository.jboss.org/maven2).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for snapshots.jboss.org (http://snapshots.jboss.org/maven2).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for oss.sonatype.org/jboss-snapshots (http://oss.sonatype.org/content/repositories/jboss-snapshots).
-[DEBUG] Using mirror tcmb-internal-repo (https://atlas.tcmb.gov.tr/nexus/repository/maven2-default-dependency/) for codehaus.snapshots (http://snapshots.repository.codehaus.org).
-[DEBUG] Dependency collection stats: {ConflictMarker.analyzeTime=89300, ConflictMarker.markTime=49900, ConflictMarker.nodeCount=86, ConflictIdSorter.graphTime=31600, ConflictIdSorter.topsortTime=27900, ConflictIdSorter.conflictIdCount=35, ConflictIdSorter.conflictIdCycleCount=0, ConflictResolver.totalTime=278000, ConflictResolver.conflictItemCount=85, DefaultDependencyCollector.collectTime=89937900, DefaultDependencyCollector.transformTime=506600}
-[DEBUG] org.apache.maven.plugins:maven-resources-plugin:jar:3.2.0
-[DEBUG]    org.apache.maven:maven-plugin-api:jar:3.1.0:compile
-[DEBUG]       org.apache.maven:maven-artifact:jar:3.1.0:compile
-[DEBUG]    org.apache.maven:maven-core:jar:3.1.0:compile
-[DEBUG]       org.apache.maven:maven-settings:jar:3.1.0:compile
-[DEBUG]       org.apache.maven:maven-settings-builder:jar:3.1.0:compile
-[DEBUG]       org.apache.maven:maven-repository-metadata:jar:3.1.0:compile
-[DEBUG]       org.apache.maven:maven-model-builder:jar:3.1.0:compile
-[DEBUG]       org.apache.maven:maven-aether-provider:jar:3.1.0:compile
-[DEBUG]          org.eclipse.aether:aether-spi:jar:0.9.0.M2:compile
-[DEBUG]       org.eclipse.aether:aether-impl:jar:0.9.0.M2:compile
-[DEBUG]       org.eclipse.aether:aether-api:jar:0.9.0.M2:compile
-[DEBUG]       org.eclipse.aether:aether-util:jar:0.9.0.M2:compile
-[DEBUG]       org.codehaus.plexus:plexus-utils:jar:3.0.10:compile
-[DEBUG]       org.codehaus.plexus:plexus-classworlds:jar:2.4.2:compile
-[DEBUG]       org.sonatype.plexus:plexus-sec-dispatcher:jar:1.3:compile
-[DEBUG]          org.sonatype.plexus:plexus-cipher:jar:1.4:compile
-[DEBUG]    org.apache.maven:maven-model:jar:3.1.0:compile
-[DEBUG]    org.codehaus.plexus:plexus-component-annotations:jar:2.0.0:compile
-[DEBUG]    org.codehaus.plexus:plexus-interpolation:jar:1.26:runtime
-[DEBUG]    org.eclipse.sisu:org.eclipse.sisu.plexus:jar:0.0.0.M2a:compile
-[DEBUG]       javax.enterprise:cdi-api:jar:1.0:compile
-[DEBUG]          javax.annotation:jsr250-api:jar:1.0:compile
-[DEBUG]          javax.inject:javax.inject:jar:1:compile
-[DEBUG]       com.google.guava:guava:jar:10.0.1:compile
-[DEBUG]          com.google.code.findbugs:jsr305:jar:1.3.9:compile
-[DEBUG]       org.sonatype.sisu:sisu-guice:jar:no_aop:3.1.0:compile
-[DEBUG]          aopalliance:aopalliance:jar:1.0:compile
-[DEBUG]       org.eclipse.sisu:org.eclipse.sisu.inject:jar:0.0.0.M2a:compile
-[DEBUG]          asm:asm:jar:3.3.1:compile
-[DEBUG]    org.apache.maven.shared:maven-filtering:jar:3.2.0:compile
-[DEBUG]       org.apache.maven.shared:maven-shared-utils:jar:3.3.3:compile
-[DEBUG]       org.sonatype.plexus:plexus-build-api:jar:0.0.7:compile
-[DEBUG]    commons-io:commons-io:jar:2.6:compile
-[DEBUG]    org.apache.commons:commons-lang3:jar:3.8.1:compile
-[DEBUG] Created new class realm plugin>org.apache.maven.plugins:maven-resources-plugin:3.2.0
-[DEBUG] Importing foreign packages into class realm plugin>org.apache.maven.plugins:maven-resources-plugin:3.2.0
-[DEBUG]   Imported:  < maven.api
-[DEBUG] Populating class realm plugin>org.apache.maven.plugins:maven-resources-plugin:3.2.0
-[DEBUG]   Included: org.apache.maven.plugins:maven-resources-plugin:jar:3.2.0
-[DEBUG]   Included: org.eclipse.aether:aether-util:jar:0.9.0.M2
-[DEBUG]   Included: org.codehaus.plexus:plexus-utils:jar:3.0.10
-[DEBUG]   Included: org.sonatype.plexus:plexus-sec-dispatcher:jar:1.3
-[DEBUG]   Included: org.sonatype.plexus:plexus-cipher:jar:1.4
-[DEBUG]   Included: org.codehaus.plexus:plexus-component-annotations:jar:2.0.0
-[DEBUG]   Included: org.codehaus.plexus:plexus-interpolation:jar:1.26
-[DEBUG]   Included: javax.enterprise:cdi-api:jar:1.0
-[DEBUG]   Included: com.google.guava:guava:jar:10.0.1
-[DEBUG]   Included: com.google.code.findbugs:jsr305:jar:1.3.9
-[DEBUG]   Included: org.sonatype.sisu:sisu-guice:jar:no_aop:3.1.0
-[DEBUG]   Included: aopalliance:aopalliance:jar:1.0
-[DEBUG]   Included: org.eclipse.sisu:org.eclipse.sisu.inject:jar:0.0.0.M2a
-[DEBUG]   Included: asm:asm:jar:3.3.1
-[DEBUG]   Included: org.apache.maven.shared:maven-filtering:jar:3.2.0
-[DEBUG]   Included: org.apache.maven.shared:maven-shared-utils:jar:3.3.3
-[DEBUG]   Included: org.sonatype.plexus:plexus-build-api:jar:0.0.7
-[DEBUG]   Included: commons-io:commons-io:jar:2.6
-[DEBUG]   Included: org.apache.commons:commons-lang3:jar:3.8.1
-[DEBUG] Configuring mojo org.apache.maven.plugins:maven-resources-plugin:3.2.0:resources from plugin realm ClassRealm[plugin>org.apache.maven.plugins:maven-resources-plugin:3.2.0, parent: jdk.internal.loader.ClassLoaders$AppClassLoader@6ed3ef1]
-[DEBUG] Configuring mojo 'org.apache.maven.plugins:maven-resources-plugin:3.2.0:resources' with basic configurator -->
-[DEBUG]   (f) addDefaultExcludes = true
-[DEBUG]   (f) buildFilters = []
-[DEBUG]   (s) delimiters = [@]
-[DEBUG]   (f) encoding = UTF-8
-[DEBUG]   (f) escapeWindowsPaths = true
-[DEBUG]   (f) fileNameFiltering = false
-[DEBUG]   (s) includeEmptyDirs = false
-[DEBUG]   (s) outputDirectory = C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes
-[DEBUG]   (s) overwrite = false
-[DEBUG]   (f) project = MavenProject: OGMDFIF:OGMDFIFSE:0.0.1 @ C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\pom.xml
-[DEBUG]   (f) propertiesEncoding = UTF-8
-[DEBUG]   (s) resources = [Resource {targetPath: null, filtering: true, FileSet {directory: C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources, PatternSet [includes: {**/application*.yml, **/application*.yaml, **/application*.properties}, excludes: {}]}}, Resource {targetPath: null, filtering: false, FileSet {directory: C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources, PatternSet [includes: {}, excludes: {**/application*.yml, **/application*.yaml, **/application*.properties}]}}]
-[DEBUG]   (f) session = org.apache.maven.execution.MavenSession@479111ba
-[DEBUG]   (f) skip = false
-[DEBUG]   (f) supportMultiLineFiltering = false
-[DEBUG]   (f) useBuildFilters = true
-[DEBUG]   (s) useDefaultDelimiters = false
-[DEBUG] -- end configuration --
-[DEBUG] properties used {env.NUMBER_OF_PROCESSORS=20, spring-integration.version=5.4.4, flyway.version=7.1.1, env.USERPROFILE=C:\Users\k017253, java.specification.version=11, webjars-hal-browser.version=3325375, env.PROGRAMW6432=C:\Program Files, java.vendor.url=http://java.oracle.com/, env.OS=Windows_NT, sun.boot.library.path=C:\Users\k017253\Downloads\openjdk-11.0.2_windows-x64_bin\jdk-11.0.2\bin, sun.java.command=org.codehaus.classworlds.Launcher -Didea.version=2024.3.1.1 -DskipTests=true clean install -X, jdk.debug=release, maven.version=3.6.3, javax-activation.version=1.2.0, kafka.version=2.6.0, jboss-transaction-spi.version=7.6.0.Final, java.specification.name=Java Platform API Specification, java.vm.specification.vendor=Oracle Corporation, env.USERDOMAIN_ROAMINGPROFILE=IDMD01, maven-install-plugin.version=2.5.2, byte-buddy.version=1.10.20, java.runtime.version=11.0.2+9, env.PUBLIC=C:\Users\Public, env.COMMONPROGRAMW6432=C:\Program Files\Common Files, java.vendor.version=18.9, env.COMPUTERNAME=DB236984, micrometer.version=1.6.4, rxjava-adapter.version=1.2.1, project.baseUri=file:/C:/Users/k017253/IdeaProjects/ogm/ogmdfifse/, hibernate.version=5.4.28.Final, java.io.tmpdir=C:\Users\k017253\AppData\Local\Temp\, java.version=11.0.2, javax-persistence.version=2.2, jakarta-ws-rs.version=2.1.6, build-helper-maven-plugin.version=3.2.0, mockito.version=3.6.28, java.vm.specification.name=Java Virtual Machine Specification, infinispan.version=11.0.9.Final, nekohtml.version=1.9.22, maven-assembly-plugin.version=3.3.0, java.library.path=C:\Users\k017253\Downloads\openjdk-11.0.2_windows-x64_bin\jdk-11.0.2\bin;C:\WINDOWS\Sun\Java\bin;C:\WINDOWS\system32;C:\WINDOWS;C:\Program Files (x86)\Common Files\Oracle\Java\java8path;C:\Program Files (x86)\Common Files\Oracle\Java\javapath;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files (x86)\Pulse Secure\VC142.CRT\X64\;C:\Program Files (x86)\Pulse Secure\VC142.CRT\X86\;C:\Program Files (x86)\Common Files\Pulse Secure\TNC Client Plugin\;C:\Program Files (x86)\Enterprise Vault\EVClient\x64\;C:\Program Files\Rancher Desktop\resources\resources\win32\bin\;C:\Program Files\Rancher Desktop\resources\resources\win32\docker-cli-plugins\;C:\Program Files\Rancher Desktop\resources\resources\linux\bin\;C:\Program Files\Rancher Desktop\resources\resources\linux\docker-cli-plugins\;C:\Program Files\nodejs\;C:\Users\k017253\AppData\Local\Microsoft\WindowsApps;C:\Users\k017253\AppData\Local\Programs\Git\cmd;C:\tcmb\programs\PowerShell-7.2.6-win-x64;C:\Users\k017253\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\k017253\AppData\Roaming\npm;C:\Users\k017253\AppData\Local\JetBrains\Toolbox\scripts;;., jakarta-servlet.version=4.0.4, java.vendor=Oracle Corporation, thymeleaf-extras-java8time.version=3.0.4.RELEASE, undertow.version=2.2.4.Final, mariadb.version=2.7.2, env.EFC_11372=1, selenium-htmlunit.version=2.44.0, thymeleaf-extras-data-attribute.version=2.0.1, ehcache3.version=3.9.0, jakarta-xml-bind.version=2.3.3, commons-dbcp2.version=2.8.0, mongodb.version=4.1.1, user.timezone=, java.vm.specification.version=11, javax-transaction.version=1.3, maven.compiler.source=1.8, user.home=C:\Users\k017253, env.ALLUSERSPROFILE=C:\ProgramData, env.SESSIONNAME=Console, postgresql.version=42.2.18, reactive-streams.version=1.0.3, jmustache.version=1.15, querydsl.version=4.4.0, appengine-sdk.version=1.9.86, thymeleaf-layout-dialect.version=2.5.2, hamcrest.version=2.2, os.version=10.0, commons-pool.version=1.6, env.PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC, jakarta-jms.version=2.0.3, jakarta-transaction.version=1.3.3, java.vm.name=OpenJDK 64-Bit Server VM, maven-help-plugin.version=3.2.0, mimepull.version=1.9.13, json-path.version=2.4.0, jaxen.version=1.2.0, johnzon.version=1.2.10, env.USERNAME=K017253, os.arch=amd64, spring-batch.version=4.3.1, couchbase-client.version=3.0.10, derby.version=10.14.2.0, javax-jsonb.version=1.0, rxjava2.version=2.2.21, javax-jaxws.version=2.3.1, awt.toolkit=sun.awt.windows.WToolkit, env.ONEDRIVE=C:\Users\k017253\OneDrive, json-smart.version=2.3, javax-websocket.version=1.1, env.UATDATA=C:\WINDOWS\CCM\UATData\D9F8C395-CAB8-491d-B8AC-179A1FE1BE77, user.country.format=TR, commons-codec.version=1.15, caffeine.version=2.8.8, h2.version=1.4.200, env.PROGRAMFILES=C:\Program Files, buildImage=biepltf/biepltfcm-buildimage/jdk11, java.vm.compressedOopsMode=Zero based, pooled-jms.version=1.2.1, unboundid-ldapsdk.version=4.0.14, thymeleaf-extras-springsecurity.version=3.0.4.RELEASE, javax-jaxb.version=2.3.1, sqlite-jdbc.version=3.32.3.3, jakarta-servlet-jsp-jstl.version=1.2.7, activemq.version=5.16.1, httpasyncclient.version=4.1.4, jtds.version=1.3.1, javax-jms.version=2.0.1, jakarta-websocket.version=1.1.2, spring-security.version=5.4.5, hibernate-validator.version=6.1.7.Final, env.DRIVERDATA=C:\Windows\System32\Drivers\DriverData, assertj.version=3.18.1, jakarta-xml-soap.version=1.4.2, env.SYSTEMDRIVE=C:, env.QIP11372=0, env.PROCESSOR_LEVEL=6, env.TMP=C:\Users\k017253\AppData\Local\Temp, influxdb-java.version=2.20, sun.os.patch.level=, lombok.version=1.18.18, maven.compiler.target=1.8, project.compiler.encoding=UTF-8, jakarta-xml-ws.version=2.3.3, env.WINDIR=C:\WINDOWS, commons-pool2.version=2.9.0, jackson-bom.version=2.11.4, spring-retry.version=1.3.1, env.USERDNSDOMAIN=TCMB.GOV.TR, maven-invoker-plugin.version=3.2.1, maven-antrun-plugin.version=1.8, maven.conf=C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3/conf, sun.java.launcher=SUN_STANDARD, user.country=US, env.USERDOMAIN=IDMD01, env.__PSLOCKDOWNPOLICY=0, resource.delimiter=@, javax-json.version=1.1.4, jboss-logging.version=3.4.1.Final, maven-resources-plugin.version=3.2.0, javax-validation.version=2.0.1.Final, netty.version=4.1.59.Final, jetty-jsp.version=2.2.0.v201112011158, maven-source-plugin.version=3.2.1, jetty.version=9.4.36.v20210114, rxjava.version=1.3.8, elasticsearch.version=7.9.3, java.runtime.name=OpenJDK Runtime Environment, rest-assured.version=3.3.0, env.COMMONPROGRAMFILES(X86)=C:\Program Files (x86)\Common Files, maven-deploy-plugin.version=2.8.2, env.ZES_ENABLE_SYSMAN=1, log4j2.version=2.13.3, maven-failsafe-plugin.version=2.22.2, spring-framework.version=5.3.4, dropwizard-metrics.version=4.1.17, git-commit-id-plugin.version=3.0.1, kotlin-coroutines.version=1.4.2, hazelcast-hibernate5.version=2.1.1, htmlunit.version=2.44.0, sun.cpu.isalist=amd64, sun.arch.data.model=64, spring-restdocs.version=2.0.5.RELEASE, freemarker.version=2.3.31, thymeleaf.version=3.0.12.RELEASE, jakarta-json.version=1.1.6, janino.version=3.1.3, maven-jar-plugin.version=3.2.0, env.SYSTEMROOT=C:\WINDOWS, maven-compiler-plugin.version=3.8.1, java.specification.vendor=Oracle Corporation, bitronix.version=2.1.4, rabbit-amqp-client.version=5.10.0, java.version.date=2019-01-15, spring-amqp.version=2.3.5, java.home=C:\Users\k017253\Downloads\openjdk-11.0.2_windows-x64_bin\jdk-11.0.2, maven-war-plugin.version=3.3.1, env.LOCALAPPDATA=C:\Users\k017253\AppData\Local, user.script=, jolokia.version=1.6.2, sun.management.compiler=HotSpot 64-Bit Tiered Compilers, jetty-reactive-httpclient.version=1.1.5, env.PATH=C:\Program Files (x86)\Common Files\Oracle\Java\java8path;C:\Program Files (x86)\Common Files\Oracle\Java\javapath;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files (x86)\Pulse Secure\VC142.CRT\X64\;C:\Program Files (x86)\Pulse Secure\VC142.CRT\X86\;C:\Program Files (x86)\Common Files\Pulse Secure\TNC Client Plugin\;C:\Program Files (x86)\Enterprise Vault\EVClient\x64\;C:\Program Files\Rancher Desktop\resources\resources\win32\bin\;C:\Program Files\Rancher Desktop\resources\resources\win32\docker-cli-plugins\;C:\Program Files\Rancher Desktop\resources\resources\linux\bin\;C:\Program Files\Rancher Desktop\resources\resources\linux\docker-cli-plugins\;C:\Program Files\nodejs\;C:\Users\k017253\AppData\Local\Microsoft\WindowsApps;C:\Users\k017253\AppData\Local\Programs\Git\cmd;C:\tcmb\programs\PowerShell-7.2.6-win-x64;C:\Users\k017253\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\k017253\AppData\Roaming\npm;C:\Users\k017253\AppData\Local\JetBrains\Toolbox\scripts;, httpclient.version=4.5.13, maven-dependency-plugin.version=3.1.2, jsonassert.version=1.5.0, file.encoding=UTF-8, gson.version=2.8.6, sun-mail.version=1.6.5, jakarta-annotation.version=1.3.5, env.HOMEPATH=\Users\k017253, env.APPDATA=C:\Users\k017253\AppData\Roaming, mssql-jdbc.version=8.4.1.jre8, snakeyaml.version=1.27, okhttp3.version=3.14.9, liquibase.version=3.10.3, java.awt.printerjob=sun.awt.windows.WPrinterJob, httpcore.version=4.4.14, lettuce.version=6.0.2.RELEASE, classworlds.conf=C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\bin\m2.conf, sun.io.unicode.encoding=UnicodeLittle, sun.desktop=windows, kotlin.version=1.4.30, wsdl4j.version=1.6.3, tomcat.version=9.0.43, sendgrid.version=4.6.8, glassfish-jaxb.version=2.3.3, spring-ws.version=3.0.10.RELEASE, commons-lang3.version=3.11, os.name=Windows 10, junit.version=4.13.2, jetty-el.version=8.5.54, env.=::=::\, db2-jdbc.version=11.5.5.0, maven.build.timestamp=2025-08-26T04:43:11Z, reactor-bom.version=2020.0.4, maven-enforcer-plugin.version=3.0.0-M3, jstl.version=1.2, java.awt.graphicsenv=sun.awt.Win32GraphicsEnvironment, quartz.version=2.3.2, javax-money.version=1.1, spring-hateoas.version=1.2.4, path.separator=;, jakarta-validation.version=2.0.2, maven.ext.class.path=C:\Users\k017253\AppData\Local\JetBrains\IntelliJ IDEA 2024.3.1.1\plugins\maven\lib\maven-event-listener.jar, maven.multiModuleProjectDirectory=C:\Users\k017253\IdeaProjects\ogm\ogmdfifse, user.language.format=tr, oracle-database.version=19.8.0.0, java.vm.info=mixed mode, cassandra-driver.version=4.9.0, env.TEMP=C:\Users\k017253\AppData\Local\Temp, java.class.version=55.0, xml-maven-plugin.version=1.0.2, sun.jnu.encoding=Cp1254, xmlunit2.version=2.7.0, jakarta-mail.version=1.6.5, slf4j.version=1.7.30, r2dbc-bom.version=Arabba-SR8, solr.version=8.5.2, saaj-impl.version=1.5.2, nimbus-jose-jwt.version=8.20.2, maven.build.version=Apache Maven 3.6.3 (cecedd343002696d0abb50b32b541b8a6ba2883f), hikaricp.version=3.4.5, maven.home=C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3, netty-tcnative.version=2.0.36.Final, maven-shade-plugin.version=3.2.4, jakarta-json-bind.version=1.0.2, file.separator=\, line.separator=
-, env.PROCESSOR_REVISION=ba02, spring-kafka.version=2.6.6, jersey.version=2.32, env.PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 186 Stepping 2, GenuineIntel, env.PROGRAMDATA=C:\ProgramData, user.name=K017253, hazelcast.version=4.0.3, jdom2.version=2.0.6, atomikos.version=4.0.6, aspectj.version=1.9.6, env.PROGRAMFILES(X86)=C:\Program Files (x86), idea.version=2024.3.1.1, hsqldb.version=2.5.1, ojdbc.version=19.3.0.0, env.HOMEDRIVE=C:, env.PSMODULEPATH=C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules, webjars-locator-core.version=0.46, project.reporting.outputEncoding=UTF-8, env.LOGONSERVER=\\IDMVAD5, oauth2-oidc-sdk.version=8.36, awaitility.version=4.0.3, embedded-mongo.version=2.2.0, spring-ldap.version=2.3.3.RELEASE, java.class.path=C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\boot\plexus-classworlds-2.6.0.jar;C:\Users\k017253\.m2\wrapper\dists\apache-maven-3.6.3-bin\1iopthnavndlasol9gbrbg6bf2\apache-maven-3.6.3\boot\plexus-classworlds.license, dependency-management-plugin.version=1.0.11.RELEASE, java.vm.vendor=Oracle Corporation, env.PROCESSOR_ARCHITECTURE=AMD64, user.variant=, maven-javadoc-plugin.version=3.2.0, servlet-api.version=4.0.1, env.COMMONPROGRAMFILES=C:\Program Files\Common Files, rsocket.version=1.1.0, jakarta-persistence.version=2.2.3, artemis.version=2.15.0, groovy.version=2.5.14, javax-cache.version=1.1.1, logback.version=1.2.3, prometheus-pushgateway.version=0.9.0, env.COMSPEC=C:\WINDOWS\system32\cmd.exe, sun.cpu.endian=little, versions-maven-plugin.version=2.8.1, user.language=en, jedis.version=3.3.0, maven-clean-plugin.version=3.1.0, javax-mail.version=1.6.2, maven-surefire-plugin.version=2.22.2, javax-annotation.version=1.3.2, spring-data-bom.version=2020.0.5, mysql.version=8.0.23, classmate.version=1.5.1, jaybird.version=3.0.10, antlr2.version=2.7.7, selenium.version=3.141.59, glassfish-el.version=3.0.3, project.build.sourceEncoding=UTF-8, skipTests=true, jooq.version=3.14.7, java.vendor.url.bug=http://bugreport.java.com/bugreport/, user.dir=C:\Users\k017253\IdeaProjects\ogm\ogmdfifse, jansi.passthrough=true, versionNumber=0.0.1, ehcache.version=2.10.6, junit-jupiter.version=5.7.1, java.vm.version=11.0.2+9, neo4j-java-driver.version=4.1.1, jakarta-activation.version=1.2.2, spring-session-bom.version=2020.0.3}
-[INFO] Using 'UTF-8' encoding to copy filtered resources.
-[INFO] Using 'UTF-8' encoding to copy filtered properties files.
-[DEBUG] resource with targetPath null
-directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources
-excludes []
-includes [**/application*.yml, **/application*.yaml, **/application*.properties]
-[DEBUG] ignoreDelta true
-[INFO] Copying 2 resources
-[DEBUG] Copying file application-local.properties
-[DEBUG] file application-local.properties has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'application-local.properties'.
-[DEBUG] filtering C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\application-local.properties to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\application-local.properties
-[DEBUG] Copying file application.properties
-[DEBUG] file application.properties has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'application.properties'.
-[DEBUG] filtering C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\application.properties to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\application.properties
-[DEBUG] resource with targetPath null
-directory C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources
-excludes [**/application*.yml, **/application*.yaml, **/application*.properties]
-includes []
-[DEBUG] ignoreDelta true
-[INFO] Copying 47 resources
-[DEBUG] Copying file certificate\cacerts
-[DEBUG] file cacerts has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'cacerts'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\cacerts to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\cacerts
-[DEBUG] Copying file certificate\certTB.pem
-[DEBUG] file certTB.pem has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'certTB.pem'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\certTB.pem to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\certTB.pem
-[DEBUG] Copying file certificate\client-keystore.jks
-[DEBUG] file client-keystore.jks has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'client-keystore.jks'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\client-keystore.jks to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\client-keystore.jks
-[DEBUG] Copying file certificate\client-truststore.jks
-[DEBUG] file client-truststore.jks has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'client-truststore.jks'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\client-truststore.jks to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\client-truststore.jks
-[DEBUG] Copying file certificate\cs-com-tr.pem
-[DEBUG] file cs-com-tr.pem has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'cs-com-tr.pem'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\cs-com-tr.pem to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\cs-com-tr.pem
-[DEBUG] Copying file certificate\keystore.p12
-[DEBUG] file keystore.p12 has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'keystore.p12'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\keystore.p12 to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\keystore.p12
-[DEBUG] Copying file certificate\_.cs.com.tr.crt
-[DEBUG] file _.cs.com.tr.crt has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource '_.cs.com.tr.crt'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\_.cs.com.tr.crt to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\_.cs.com.tr.crt
-[DEBUG] Copying file certificate\_.cs.com.tr.pem
-[DEBUG] file _.cs.com.tr.pem has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource '_.cs.com.tr.pem'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\certificate\_.cs.com.tr.pem to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\certificate\_.cs.com.tr.pem
-[DEBUG] Copying file fonts\arial.ttf
-[DEBUG] file arial.ttf has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'arial.ttf'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\fonts\arial.ttf to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts\arial.ttf
-[DEBUG] Copying file fonts\DejaVuSans.ttf
-[DEBUG] file DejaVuSans.ttf has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'DejaVuSans.ttf'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\fonts\DejaVuSans.ttf to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts\DejaVuSans.ttf
-[DEBUG] Copying file fonts\times.ttf
-[DEBUG] file times.ttf has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'times.ttf'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\fonts\times.ttf to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\fonts\times.ttf
-[DEBUG] Copying file pattern\turkishPatternTable
-[DEBUG] file turkishPatternTable has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'turkishPatternTable'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\pattern\turkishPatternTable to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\pattern\turkishPatternTable
-[DEBUG] Copying file print\BILGIFORMULST.xml
-[DEBUG] file BILGIFORMULST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'BILGIFORMULST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\BILGIFORMULST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\BILGIFORMULST.xml
-[DEBUG] Copying file print\BORCSUZIHRACATCIDAVETMEKTUP.xml
-[DEBUG] file BORCSUZIHRACATCIDAVETMEKTUP.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'BORCSUZIHRACATCIDAVETMEKTUP.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\BORCSUZIHRACATCIDAVETMEKTUP.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\BORCSUZIHRACATCIDAVETMEKTUP.xml
-[DEBUG] Copying file print\DAVET_MEKTUP.docx
-[DEBUG] file DAVET_MEKTUP.docx has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'DAVET_MEKTUP.docx'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\DAVET_MEKTUP.docx to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\DAVET_MEKTUP.docx
-[DEBUG] Copying file print\DEVIRLST.xml
-[DEBUG] file DEVIRLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'DEVIRLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\DEVIRLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\DEVIRLST.xml
-[DEBUG] Copying file print\GENELODEMELST.xml
-[DEBUG] file GENELODEMELST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'GENELODEMELST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\GENELODEMELST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\GENELODEMELST.xml
-[DEBUG] Copying file print\HAKEDISBELGESI1.xml
-[DEBUG] file HAKEDISBELGESI1.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'HAKEDISBELGESI1.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\HAKEDISBELGESI1.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISBELGESI1.xml
-[DEBUG] Copying file print\HAKEDISBELGESI2.xml
-[DEBUG] file HAKEDISBELGESI2.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'HAKEDISBELGESI2.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\HAKEDISBELGESI2.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISBELGESI2.xml
-[DEBUG] Copying file print\HAKEDISLST.xml
-[DEBUG] file HAKEDISLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'HAKEDISLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\HAKEDISLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISLST.xml
-[DEBUG] Copying file print\HAKEDISZIMMETLST.xml
-[DEBUG] file HAKEDISZIMMETLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'HAKEDISZIMMETLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\HAKEDISZIMMETLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDISZIMMETLST.xml
-[DEBUG] Copying file print\HAKEDIS_DEVIR.docx
-[DEBUG] file HAKEDIS_DEVIR.docx has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'HAKEDIS_DEVIR.docx'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\HAKEDIS_DEVIR.docx to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HAKEDIS_DEVIR.docx
-[DEBUG] Copying file print\HESAPSIZIHRACATCILST.xml
-[DEBUG] file HESAPSIZIHRACATCILST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'HESAPSIZIHRACATCILST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\HESAPSIZIHRACATCILST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\HESAPSIZIHRACATCILST.xml
-[DEBUG] Copying file print\IHRACATCIDAVETMEKTUP.xml
-[DEBUG] file IHRACATCIDAVETMEKTUP.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'IHRACATCIDAVETMEKTUP.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\IHRACATCIDAVETMEKTUP.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIDAVETMEKTUP.xml
-[DEBUG] Copying file print\IHRACATCIDEVIRMEKTUP.xml
-[DEBUG] file IHRACATCIDEVIRMEKTUP.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'IHRACATCIDEVIRMEKTUP.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\IHRACATCIDEVIRMEKTUP.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIDEVIRMEKTUP.xml
-[DEBUG] Copying file print\IHRACATCINAKITMEKTUP.xml
-[DEBUG] file IHRACATCINAKITMEKTUP.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'IHRACATCINAKITMEKTUP.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\IHRACATCINAKITMEKTUP.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCINAKITMEKTUP.xml
-[DEBUG] Copying file print\IHRACATCINAKITODEMEMEKTUP.xml
-[DEBUG] file IHRACATCINAKITODEMEMEKTUP.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'IHRACATCINAKITODEMEMEKTUP.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\IHRACATCINAKITODEMEMEKTUP.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCINAKITODEMEMEKTUP.xml
-[DEBUG] Copying file print\IHRACATCIODEMELST.xml
-[DEBUG] file IHRACATCIODEMELST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'IHRACATCIODEMELST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\IHRACATCIODEMELST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIODEMELST.xml
-[DEBUG] Copying file print\IHRACATCIZIMMETMEKTUP.xml
-[DEBUG] file IHRACATCIZIMMETMEKTUP.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'IHRACATCIZIMMETMEKTUP.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\IHRACATCIZIMMETMEKTUP.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\IHRACATCIZIMMETMEKTUP.xml
-[DEBUG] Copying file print\SUBIFOS.EBIMONAYLST.xml
-[DEBUG] file SUBIFOS.EBIMONAYLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.EBIMONAYLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.EBIMONAYLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.EBIMONAYLST.xml
-[DEBUG] Copying file print\SUBIFOS.IHRACATCILST.xml
-[DEBUG] file SUBIFOS.IHRACATCILST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.IHRACATCILST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.IHRACATCILST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.IHRACATCILST.xml
-[DEBUG] Copying file print\SUBIFOS.IHRBIRLST.xml
-[DEBUG] file SUBIFOS.IHRBIRLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.IHRBIRLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.IHRBIRLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.IHRBIRLST.xml
-[DEBUG] Copying file print\SUBIFOS.IHRTAKIPHESAPLST.xml
-[DEBUG] file SUBIFOS.IHRTAKIPHESAPLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.IHRTAKIPHESAPLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.IHRTAKIPHESAPLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.IHRTAKIPHESAPLST.xml
-[DEBUG] Copying file print\SUBIFOS.KARARLST.xml
-[DEBUG] file SUBIFOS.KARARLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.KARARLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.KARARLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.KARARLST.xml
-[DEBUG] Copying file print\SUBIFOS.PIKURDETAYLST.xml
-[DEBUG] file SUBIFOS.PIKURDETAYLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.PIKURDETAYLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.PIKURDETAYLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PIKURDETAYLST.xml
-[DEBUG] Copying file print\SUBIFOS.PROVBEKLEYENKARARLAR.xml
-[DEBUG] file SUBIFOS.PROVBEKLEYENKARARLAR.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.PROVBEKLEYENKARARLAR.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.PROVBEKLEYENKARARLAR.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVBEKLEYENKARARLAR.xml
-[DEBUG] Copying file print\SUBIFOS.PROVIZYONISTEMELST.xml
-[DEBUG] file SUBIFOS.PROVIZYONISTEMELST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.PROVIZYONISTEMELST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.PROVIZYONISTEMELST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONISTEMELST.xml
-[DEBUG] Copying file print\SUBIFOS.PROVIZYONTALEPICMALLST.xml
-[DEBUG] file SUBIFOS.PROVIZYONTALEPICMALLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.PROVIZYONTALEPICMALLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.PROVIZYONTALEPICMALLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONTALEPICMALLST.xml
-[DEBUG] Copying file print\SUBIFOS.PROVIZYONTALEPODEMELST.xml
-[DEBUG] file SUBIFOS.PROVIZYONTALEPODEMELST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.PROVIZYONTALEPODEMELST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.PROVIZYONTALEPODEMELST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONTALEPODEMELST.xml
-[DEBUG] Copying file print\SUBIFOS.PROVIZYONTALEPSAOSLST.xml
-[DEBUG] file SUBIFOS.PROVIZYONTALEPSAOSLST.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'SUBIFOS.PROVIZYONTALEPSAOSLST.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\print\SUBIFOS.PROVIZYONTALEPSAOSLST.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\print\SUBIFOS.PROVIZYONTALEPSAOSLST.xml
-[DEBUG] Copying file schema.sql
-[DEBUG] file schema.sql has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'schema.sql'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\schema.sql to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\schema.sql
-[DEBUG] Copying file schema_pd.sql
-[DEBUG] file schema_pd.sql has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'schema_pd.sql'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\schema_pd.sql to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\schema_pd.sql
-[DEBUG] Copying file spring\mailSenderBeans.xml
-[DEBUG] file mailSenderBeans.xml has a filtered file extension
-[DEBUG] Using 'UTF-8' encoding to copy filtered resource 'mailSenderBeans.xml'.
-[DEBUG] copy C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\src\main\resources\spring\mailSenderBeans.xml to C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\spring\mailSenderBeans.xml
+    @Override
+    public void odenmeyecekTahakkuklarinBorclariniTemizle() {
+        for (Long tahakkukId : kontrolEdilmisOdenemezTahakkukIdSet) {
+            List<ProvizyonTalep> provizyonTalepList = provizyonTalepService.getProvizyonTalepByTahakkukId(tahakkukId);
+            for (ProvizyonTalep provizyonTalep : provizyonTalepList) {
+                List<Provizyon> provizyonList = provizyonIslemleriService.getProvizyonListesi(Collections.singletonList(provizyonTalep.getId()));
+                for (Provizyon provizyon : provizyonList) {
+                    List<BorcBilgi> borcBilgiList = provizyon.getBorcBilgiList();
+                    for (BorcBilgi borcBilgi : borcBilgiList) {
+                        logger.info("odenmeyecekTahakkuklarinBorclariniTemizle","siliniyor: " + borcBilgi);
+                        borcBilgisiService.deleteBorcBilgi(borcBilgi);
+                    }
+                }
+            }
+        }
+    }
+
+    @Override
+    public void tahsilatKontroluYap() {
+        Date bugun = new Date();
+        List<SorgulananBorcBilgi> bugunTahsilatBekleyenSbbList = sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(bugun,
+                SorgulananBorcDurumEnum.TAHSILAT_BEKLIYOR, 0);
+        bugunTahsilatBekleyenSbbList = bugunTahsilatBekleyenSbbList.stream().filter((SorgulananBorcBilgi sorgulananBorcBilgi) ->
+            sorgulananBorcBilgi.getTahsilatTarihi() == null && StringUtils.isBlank(sorgulananBorcBilgi.getTahsilatId())).limit(100)
+                .collect(Collectors.toList());
+
+        for (SorgulananBorcBilgi sorgulananBorcBilgi : bugunTahsilatBekleyenSbbList) {
+            Set<Long> buKayitlaIlgiliOkayTahakkuklar = new HashSet<>(); // bunlarla alakali tahsilat yapacağım
+
+            List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.
+                    getSorgulananBorcBilgiTahakkukList(sorgulananBorcBilgi.getId());
+            // Bu sbb ile ilişkili sbbtleri çektik, burdan ilişkili tahakkukları kontrol etmeliyiz.
+            for (SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+                Long tahakkukId = sorgulananBorcBilgiTahakkuk.getTahakkukId();
+                if (kontrolEdilmisOdenebilirTahakkukIdSet.contains(tahakkukId)) {
+                    buKayitlaIlgiliOkayTahakkuklar.add(tahakkukId);
+                } else if (!kontrolEdilmisOdenemezTahakkukIdSet.contains(tahakkukId)) {
+                    // bu tahakkuk iki sette de yoksa, yani henüz kontrol edilmediyse
+                    List<SorgulananBorcBilgi> buPaketleIliskiliSbbList = sorgulananBorcBilgiService.getPaketleIliskiliTumTahakkuklarinSbbleri(tahakkukId);
+                    // bu tahakkukla ilişkili sbbleri çektik, durumlarına bakacağız.
+                    if (!paketteIstemedigimizDurumlarVarMi(buPaketleIliskiliSbbList)) {
+                        // paketteIstemedigimizDurumlar yok ise
+                        buKayitlaIlgiliOkayTahakkuklar.add(tahakkukId);
+                        kontrolEdilmisOdenebilirTahakkukIdSet.add(tahakkukId);
+                    } else {
+                        kontrolEdilmisOdenemezTahakkukIdSet.add(tahakkukId);
+                    }
+                }
+            }
+
+            // bu kaydı sgk - gib tahsilatına kadar götüreceğim buradan.
+            // BU KAYITLA ALAKALI TAHAKKUK->PROVİZYON TALEP->PROVİZYON->BORÇ BİLGİ erişimlerini sağlamalıyız.
+            // Ödenebilir tahakkukla ilişkili borç bilgilerin tahsilatı yapılmalı.
+            // Ödenemez durumdakilerle ilişkili olan borç bilgiler silinmeli ve tahsilata KESİNLİKLE gitmemeli.
+
+            if (buKayitlaIlgiliOkayTahakkuklar.isEmpty()) {
+                logger.error("BorcIslemleriServiceImpl","sbbId: " + sorgulananBorcBilgi.getId() + " buKayitlaIlgiliOkayTahakkuklar is empty!");
+                continue;
+            }
+
+            // ------------ ÖDENEBİLECEKLERİN İŞİ BAŞLADI.
+            List<Provizyon> odenebilirTahakkuklarinProvizyonlari = provizyonIslemleriService.getProvizyonList(new ArrayList<>(buKayitlaIlgiliOkayTahakkuklar));
+            // Buradaki provizyonların ihracatçısı şu anki sbb ile aynı olmalı.
+            String vknTckn = sorgulananBorcBilgi.getVKnTckN();
+
+            List<Provizyon> iliskiliProvizyonlar = new ArrayList<>();
+            for (Provizyon provizyon : odenebilirTahakkuklarinProvizyonlari) {
+                if (provizyon.getIhracatci().getTcknVknAsString().equals(vknTckn)) {
+                    iliskiliProvizyonlar.add(provizyon);
+                }
+            }
+
+            BigDecimal toplamSgkBorcBilgiTutarForOkayTahakkuklar = BigDecimal.ZERO;
+            BigDecimal toplamGibBorcBilgiTutarForOkayTahakkuklar = BigDecimal.ZERO;
+            List<BorcBilgi> iliskiliBorcBilgiler = borcBilgisiService.getBorcBilgiByProvizyonList(iliskiliProvizyonlar);
+            for (BorcBilgi borcBilgi : iliskiliBorcBilgiler) {
+                if (borcBilgi.getOdemeMuhasebeIstekId() == null && borcBilgi.getBorcTipi().equals(BorcTipEnum.SGK.getKod())) {
+                    toplamSgkBorcBilgiTutarForOkayTahakkuklar = toplamSgkBorcBilgiTutarForOkayTahakkuklar.add(borcBilgi.getTutar());
+                } else if (borcBilgi.getOdemeMuhasebeIstekId() == null && borcBilgi.getBorcTipi().equals(BorcTipEnum.GIB.getKod())) {
+                    toplamGibBorcBilgiTutarForOkayTahakkuklar = toplamGibBorcBilgiTutarForOkayTahakkuklar.add(borcBilgi.getTutar());
+                }
+            }
+
+            sorgulananBorcBilgi.setOdenecekSgkBorcu(toplamSgkBorcBilgiTutarForOkayTahakkuklar);
+            sorgulananBorcBilgi.setOdenecekGibBorcu(toplamGibBorcBilgiTutarForOkayTahakkuklar);
+
+            gibBorcTahsilatiGerceklestir(sorgulananBorcBilgi); // GİB TAHSİLATINI YAP.
+            toplamGibTahsilatTutarim = toplamGibTahsilatTutarim.add(toplamGibBorcBilgiTutarForOkayTahakkuklar);
+
+            df.setGroupingSize(3); // Binlik ayracı için 3 basamak
+            logger.info("BorcIslemleriServiceImpl","tahsilatKontroluYap-> toplamGibTahsilatTutarim: " + df.format(toplamGibTahsilatTutarim));
+
+            sorgulananBorcBilgi.setSorguDurum(SorgulananBorcDurumEnum.KONTROL_TAMAM.getKod());
+            sorgulananBorcBilgiService.kaydet(sorgulananBorcBilgi);
+        }
+    }
+
+    @Override
+    public void sgkTahsilatYap() {
+        Date bugun = new Date();
+        List<SorgulananBorcBilgi> bugunTahsilEdilecekSbbList = sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(bugun,
+                SorgulananBorcDurumEnum.KONTROL_TAMAM, 0);
+        bugunTahsilEdilecekSbbList = bugunTahsilEdilecekSbbList.stream().filter((SorgulananBorcBilgi sorgulananBorcBilgi) ->
+                        sorgulananBorcBilgi.getTahsilatTarihi() == null && StringUtils.isBlank(sorgulananBorcBilgi.getTahsilatId())).limit(75)
+                .collect(Collectors.toList());
+
+        for(SorgulananBorcBilgi sorgulananBorcBilgi : bugunTahsilEdilecekSbbList) {
+            String vknTckn = sorgulananBorcBilgi.getVKnTckN();
+
+            // Burada, SGK'ya tahsilat için gitmeden önce anlık (şube) tarafındaki kayıtları da kontrol etmeliyiz.
+            List<AnlikBorc> tahsilatBekleyenAnlikBorcList = anlikBorcService.getTahsilatBekleyenAnlikBorcList();
+            List<AnlikBorc> iliskiliAnlikBorclar = new ArrayList<>();
+            BigDecimal anlikBorctanBeklenilenTahsilatTutariForBuIhracatci = BigDecimal.ZERO;
+
+            for (AnlikBorc anlikBorc : tahsilatBekleyenAnlikBorcList) {
+                if (anlikBorc.getBorcTip().equals(BorcTipEnum.SGK.getKod()) && anlikBorc.getTahsilatId() == null
+                        && anlikBorc.getIhracatci().getTcknVknAsString().equals(vknTckn)) {
+                    anlikBorctanBeklenilenTahsilatTutariForBuIhracatci = anlikBorctanBeklenilenTahsilatTutariForBuIhracatci.add(anlikBorc.getOdenecekTutar());
+                    iliskiliAnlikBorclar.add(anlikBorc);
+                }
+            }
+
+            SgkBorcTahsilat sgkBorcTahsilat = new SgkBorcTahsilat();
+            sgkBorcTahsilat.setSgkBorcId(sorgulananBorcBilgi.getSgkDosyaId());
+            sgkBorcTahsilat.setAnlikBorcs(iliskiliAnlikBorclar);
+            sgkBorcTahsilat.setSorgulananBorcBilgiId(sorgulananBorcBilgi.getId());
+            sgkBorcTahsilat.setVkn(sorgulananBorcBilgi.getVkn());
+            sgkBorcTahsilat.setTckn(sorgulananBorcBilgi.getTckn());
+            BigDecimal olmasiGerekenSgkTahsilatTutari = anlikBorctanBeklenilenTahsilatTutariForBuIhracatci.add(sorgulananBorcBilgi.getOdenecekSgkBorcu());
+            sgkBorcTahsilat.setOdenecekTutar(olmasiGerekenSgkTahsilatTutari);
+            TahsilatSonuc tahsilatSonuc = sgkBorcTahsilatiniGerceklestir(sgkBorcTahsilat);
+            logger.info("sgkTahsilatYap","sgkBorcTahsilatiniGerceklestir bitti. tahsilatSonuc: " + tahsilatSonuc);
+
+            if (tahsilatSonuc.isBasarili()) {
+                for (AnlikBorc anlikBorc : iliskiliAnlikBorclar) {
+                    anlikBorc.setTahsilatId(tahsilatSonuc.getTahsilatId());
+                    anlikBorc.setTahsilatTarihi(bugun);
+                    anlikBorc.setIslemDurum(AnlikBorcDurumEnum.MUTABAKAT_BEKLIYOR.getKod());
+                    anlikBorcService.kaydet(anlikBorc);
+                }
+
+                sorgulananBorcBilgi.setTahsilatId(tahsilatSonuc.getTahsilatId());
+                if (tahsilatSonuc.getTahsilatId().equals("-")) {
+                    // Toplam SGK borcu: 0,03 (3 kuruş)
+                    // Ödenecek SGK borcu: 0 senaryosu için bug fix, sbb durumu 5'te kalmıştı.
+                    sorgulananBorcBilgi.setSgkMutabakatSaglandi(true);
+                }
+                sorgulananBorcBilgi.setTahsilatTarihi(bugun);
+                sorgulananBorcBilgiService.kaydet(sorgulananBorcBilgi);
+
+                toplamSgkTahsilatTutarim = toplamSgkTahsilatTutarim.add(olmasiGerekenSgkTahsilatTutari);
+            }
+
+            df.setGroupingSize(3); // Binlik ayracı için 3 basamak
+            logger.info("sgkTahsilatYap","sgkTahsilatYap-> toplamSgkTahsilatTutarim: " + df.format(toplamSgkTahsilatTutarim));
+        }
+
+        // Buradan itibaren sbbden bağımsız (tekil) anlık borçların tahsilatını gerçekleştireceğim.
+        Map<String, List<AnlikBorc>> ihracatciTcknVknToAnlikBorcs = new HashMap<>();
+
+        List<AnlikBorc> tahsilatBekleyenAnlikBorcList = anlikBorcService.getTahsilatBekleyenAnlikBorcList();
+        for (AnlikBorc anlikBorc : tahsilatBekleyenAnlikBorcList) {
+            boolean buIhracatcininAnlikBorcTahsilatiYapilmaliMi = false;
+            String ihracatciTcknVkn = anlikBorc.getIhracatci().getTcknVknAsString();
+            SorgulananBorcBilgi sorgulananBorcBilgi = sorgulananBorcBilgiService.getSorgulananBorcBilgiBySorguTarihi(bugun, ihracatciTcknVkn);
+            if (sorgulananBorcBilgi != null) {
+                String durum = sorgulananBorcBilgi.getSorguDurum();
+                if (durum.equals(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod()) ||
+                        durum.equals(SorgulananBorcDurumEnum.SORGU_SONUCU_BEKLIYOR.getKod()) ||
+                        durum.equals(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR.getKod()) ||
+                        durum.equals(SorgulananBorcDurumEnum.TAHSILAT_BEKLIYOR.getKod())) {
+                    // statei yukarıdaki 4 taneden biriyse, sbb ile bağlantılı tahsilat kaydedilmeyecek demektir.
+                    buIhracatcininAnlikBorcTahsilatiYapilmaliMi = true;
+                }
+            } else {
+                buIhracatcininAnlikBorcTahsilatiYapilmaliMi = true;
+            }
+
+            if (buIhracatcininAnlikBorcTahsilatiYapilmaliMi) {
+                List<AnlikBorc> anlikBorcList = ihracatciTcknVknToAnlikBorcs.get(ihracatciTcknVkn);
+                if (anlikBorcList == null) {
+                    // Bu ihracatçının birden fazla anlık borç talebi olabilir, hepsi için toplam 1 adet sgk tahsilatı kaydedilmeli.
+                    List<AnlikBorc> anlikBorcsForTahsilat = getAyniIhracatcininAnlikBorclari(tahsilatBekleyenAnlikBorcList, ihracatciTcknVkn);
+                    ihracatciTcknVknToAnlikBorcs.put(ihracatciTcknVkn, anlikBorcsForTahsilat);
+                    BigDecimal toplamTahsilatTutari = BigDecimal.ZERO;
+                    for (AnlikBorc anlikBorcForTahsilat : anlikBorcsForTahsilat) {
+                        toplamTahsilatTutari = toplamTahsilatTutari.add(anlikBorcForTahsilat.getOdenecekTutar());
+                    }
+
+                    SgkBorcTahsilat sgkBorcTahsilat = new SgkBorcTahsilat();
+                    sgkBorcTahsilat.setSgkBorcId(anlikBorcsForTahsilat.get(0).getSorguId());
+                    sgkBorcTahsilat.setAnlikBorcs(anlikBorcsForTahsilat);
+                    sgkBorcTahsilat.setSorgulananBorcBilgiId(null);
+                    sgkBorcTahsilat.setVkn(anlikBorcsForTahsilat.get(0).getIhracatci().getVkn());
+                    sgkBorcTahsilat.setTckn(anlikBorcsForTahsilat.get(0).getIhracatci().getTckn());
+                    sgkBorcTahsilat.setOdenecekTutar(toplamTahsilatTutari);
+                    TahsilatSonuc tahsilatSonuc = sgkBorcTahsilatiniGerceklestir(sgkBorcTahsilat);
+                    logger.info("sgkTahsilatYap", "Anlik borc sgkBorcTahsilatiniGerceklestir bitti. tahsilatSonuc: " + tahsilatSonuc);
+
+                    if (tahsilatSonuc.isBasarili()) {
+                        for (AnlikBorc anlikBorcForTahsilat : anlikBorcsForTahsilat) {
+                            anlikBorcForTahsilat.setTahsilatId(tahsilatSonuc.getTahsilatId());
+                            anlikBorcForTahsilat.setTahsilatTarihi(bugun);
+                            anlikBorcForTahsilat.setIslemDurum(AnlikBorcDurumEnum.MUTABAKAT_BEKLIYOR.getKod());
+                            anlikBorcService.kaydet(anlikBorcForTahsilat);
+                        }
+                        // Bu tahsilatın sbb bağı yok!
+
+                        toplamSgkTahsilatTutarim = toplamSgkTahsilatTutarim.add(toplamTahsilatTutari);
+                    }
+
+                    df.setGroupingSize(3); // Binlik ayracı için 3 basamak
+                    logger.info("sgkTahsilatYap", "Anlik sgkTahsilatYap-> toplamSgkTahsilatTutarim: " + df.format(toplamSgkTahsilatTutarim));
+                }
+            }
+        }
+    }
+
+    // Bu fonksiyon state bağımsız çalışır.
+    private List<AnlikBorc> getAyniIhracatcininAnlikBorclari(List<AnlikBorc> anlikBorcList, String ihracatciTcknVkn) {
+        List<AnlikBorc> anlikBorcs = new ArrayList<>();
+
+        for (AnlikBorc anlikBorc : anlikBorcList) {
+            if (anlikBorc.getIhracatci().getTcknVknAsString().equals(ihracatciTcknVkn)) {
+                anlikBorcs.add(anlikBorc);
+            }
+        }
+
+        return anlikBorcs;
+    }
+
+    class TahsilatSonuc {
+        private BigDecimal tahsilatTutar = BigDecimal.ZERO;
+        private String tahsilatId = null;
+        private boolean basarili = false;
+
+        public BigDecimal getTahsilatTutar() {
+            return tahsilatTutar;
+        }
+
+        public void setTahsilatTutar(BigDecimal tahsilatTutar) {
+            this.tahsilatTutar = tahsilatTutar;
+        }
+
+        public String getTahsilatId() {
+            return tahsilatId;
+        }
+
+        public void setTahsilatId(String tahsilatId) {
+            this.tahsilatId = tahsilatId;
+        }
+
+        public boolean isBasarili() {
+            return basarili;
+        }
+
+        public void setBasarili(boolean basarili) {
+            this.basarili = basarili;
+        }
+    }
+
+    private TahsilatSonuc sgkBorcTahsilatiniGerceklestir(SgkBorcTahsilat sgkBorcTahsilat) {
+        TahsilatSonuc tahsilatSonuc = new TahsilatSonuc();
+
+        logger.info("BorcIslemleriServiceImpl","sgkBorcTahsilatiniGerceklestir calisti. sgkBorcTahsilat: " + sgkBorcTahsilat);
+        // Not: Sgk'da bir borcId/talepId'ye birden fazla tahsilat kaydedilemiyor!
+        BigDecimal odenecekTutar = sgkBorcTahsilat.getOdenecekTutar();
+
+        try {
+            if (odenecekTutar.compareTo(BigDecimal.ZERO) > 0) {
+                SgkResponse<SgkTahsilatKaydetResult>
+                        sgkResponse = sgkClientService.tahsilatKaydet(Long.valueOf(sgkBorcTahsilat.getSgkBorcId()), odenecekTutar);
+                logger.info("BorcIslemleriServiceImpl",(sgkResponse != null) ? sgkResponse.toString() : "sgkResponse is NULL!");
+                if (sgkResponse != null && sgkResponse.getReturnCode() != null && (sgkResponse.getReturnCode() == 201 || sgkResponse.getReturnCode() == 102)) {
+                    // tahsilat başarıyla kaydedildi
+                    tahsilatSonuc.setTahsilatTutar(sgkResponse.getData().getTahsilatTutari());
+                    tahsilatSonuc.setTahsilatId(String.valueOf(sgkResponse.getData().getTahsilatId()));
+                    tahsilatSonuc.setBasarili(true);
+                } else {
+                    // tahsilat kaydedilemedi
+                    logger.error("BorcIslemleriServiceImpl",(StringUtils.isNotBlank(sgkBorcTahsilat.getVkn()) ? sgkBorcTahsilat.getVkn() : sgkBorcTahsilat.getTckn()) +
+                            " için SGK borç tahsilatı işlemi başarısız oldu. Borç/Dosya id: " + sgkBorcTahsilat.getSgkBorcId() +
+                            " - Tahsil Edilmek İstenen Tutar: " + odenecekTutar.toPlainString());
+                    tahsilatSonuc.setBasarili(false);
+                }
+            } else {
+                // odenecekTutar == 0
+                tahsilatSonuc.setBasarili(true);
+                tahsilatSonuc.setTahsilatTutar(BigDecimal.ZERO);
+                tahsilatSonuc.setTahsilatId("-"); // Setting a dummy tahsilatId, sgk borcu olmayanlar için tahsilat servisine gitmeden ilgili kolonu bu şekilde güncelliyoruz.
+            }
+        } catch (Exception e) {
+            logger.error("BorcIslemleriServiceImpl","sgkBorcTahsilatiniGerceklestir Borc/Dosya id: " + sgkBorcTahsilat.getSgkBorcId() + ". Hata: " + e);
+            tahsilatSonuc.setBasarili(false);
+        }
+
+        return tahsilatSonuc;
+    }
+
+    private void gibBorcTahsilatiGerceklestir(SorgulananBorcBilgi sorgulananBorcBilgi) {
+        // GİB'e web servis ile tahsilat kaydedilmiyor, mutabakat sağlanmıyor.
+        BigDecimal odenmesiGerekenGibBorcu = sorgulananBorcBilgi.getOdenecekGibBorcu();
+        if (odenmesiGerekenGibBorcu.compareTo(BigDecimal.ZERO) < 0) {
+            logger.error("BorcIslemleriServiceImpl","borcTahsilatiGerceklestir", "GIB borc tahsilati basarisiz! odenmesiGerekenGibBorcu 0'dan az olamaz! GIB dosya ID: "
+                    + sorgulananBorcBilgi.getGibDosyaId() +
+                    ", odenmesiGerekenGibBorcu: " +
+                    odenmesiGerekenGibBorcu.toPlainString() + ", sorgulananBorcBilgi: " + sorgulananBorcBilgi.getId());
+            // gib mutabakatı zaten false idi, false kalacak.
+            return; // başarısız
+        }
+
+        // odenmesiGerekenGibBorcu >= 0 ise
+        sorgulananBorcBilgi.setOdenenGibBorcu(sorgulananBorcBilgi.getOdenecekGibBorcu());
+        sorgulananBorcBilgi.setGibMutabakatSaglandi(true);
+        sorgulananBorcBilgi.setGuncelleyenKullaniciId(0);
+    }
+
+    // SADECE DAĞITIM KONTROL AŞAMASI İÇİN KONTROL SAĞLAR!
+    public static boolean paketteIstemedigimizDurumlarVarMi(List<SorgulananBorcBilgi> sorgulananBorcBilgiList) {
+        boolean paketteIstemedigimizDurumlarVar = false;
+        for(SorgulananBorcBilgi sorgulananBorcBilgi : sorgulananBorcBilgiList) {
+            if(sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod())
+                    || sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.SORGU_SONUCU_BEKLIYOR.getKod())
+                    || sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR.getKod())) {
+                paketteIstemedigimizDurumlarVar = true;
+                break;
+            }
+        }
+
+        return paketteIstemedigimizDurumlarVar;
+    }
+
+    @Override
+    public void uzunSurenKayitlarIcinMailAt() throws Exception {
+        Date today = new Date();
+        Date referansTarihi = muhasebeClientService.getOncekiSonrakiIsGunu(today, -Constants.BORC_ISLEM_SURESI);
+        Date previousWorkingDay = muhasebeClientService.getOncekiSonrakiIsGunu(today, -1);
+        List<SorgulananBorcBilgi> sorgulananBorcBilgiList = sorgulananBorcBilgiService.getSorguTarihiAyniOlanSbbList(previousWorkingDay);
+        List<SorgulananBorcBilgi> referansTarihindenOnceAtilmisKayitlar = new ArrayList<>();
+        for (SorgulananBorcBilgi sorgulananBorcBilgi : sorgulananBorcBilgiList) {
+            if (sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod()) ||
+                    sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.SORGU_SONUCU_BEKLIYOR.getKod())
+                    || sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR.getKod()) ||
+                    sorgulananBorcBilgi.getSorguDurum().equals(SorgulananBorcDurumEnum.TAHSILAT_BEKLIYOR.getKod())) {
+                if (sorgulananBorcBilgi.getKaydinIlkAtildigiTarih().compareTo(referansTarihi) <= 0) {
+                    // 2 iş günü geçtiyse bildirmek amaçlı
+                    referansTarihindenOnceAtilmisKayitlar.add(sorgulananBorcBilgi);
+                }
+            }
+        }
+        if(!referansTarihindenOnceAtilmisKayitlar.isEmpty()) {
+            uzunSurenBorcSorgulariIcinMailAt(referansTarihindenOnceAtilmisKayitlar);
+        }
+    }
+
+    private void uzunSurenBorcSorgulariIcinMailAt(List<SorgulananBorcBilgi> sorgulananBorcBilgiList) {
+        logger.info("BorcIslemleriServiceImpl","uzunSurenBorcSorgulariIcinMailAt calisti.");
+        StringBuilder hataliKayitlar = new StringBuilder();
+        SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
+        for (SorgulananBorcBilgi sorgulananBorcBilgi : sorgulananBorcBilgiList) {
+            hataliKayitlar
+                    .append("\n")
+                    .append(StringUtils.isNotBlank(sorgulananBorcBilgi.getVkn()) ? "VKN: " + sorgulananBorcBilgi.getVkn()
+                            : "TCKN: " + sorgulananBorcBilgi.getTckn())
+                    .append(", Kaydın atıldığı tarih: ").append(sdf.format(sorgulananBorcBilgi.getKaydinIlkAtildigiTarih()));
+            List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(sorgulananBorcBilgi.getId());
+            for(SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+                Tahakkuk tahakkuk = tahakkukIslemleriService.getTahakkuk(sorgulananBorcBilgiTahakkuk.getTahakkukId());
+                hataliKayitlar
+                        .append(" - Tür: ").append(KararTipiEnum.getBykod(tahakkuk.getTur()))
+                        .append(", Yıl: ").append(tahakkuk.getYil())
+                        .append(", Belge numarası: ").append(tahakkuk.getBelgeNo());
+            }
+        }
+        String subject = "OGMDFİF BORÇ SORGUSU BAŞARISIZ OLAN KAYITLAR";
+        String body = "Aşağıdaki kayıtların borç sorgu süreçleri 2 iş günü içerisinde başarıyla tamamlanamamıştır! Bilginize...\nBaşarısız olan kayıtlar:" +
+                hataliKayitlar;
+        try {
+            mailService.sendMail(EmirIslemleriServiceImpl.OGM_BIRIM_MAIL, EmirIslemleriServiceImpl.TO_LIST_ALL, null, subject, body);
+            logger.info("BorcIslemleriServiceImpl","uzunSurenBorcSorgulariIcinMailAt mail basariyla gonderildi.");
+        } catch (Exception ex) {
+            logger.error("BorcIslemleriServiceImpl","uzunSurenBorcSorgulariIcinMailAt bilgilendirme maili atilamadi. Hata: {}", ex.toString());
+        }
+    }
+
+    @Override
+    public void sorgulananBorcYeniGunleAlakaliIslemleriYap() throws Exception {
+        Date today = new Date();
+
+        // İş günü olmayan hafta içi günlerde borç sorgusu yapılmamalıdır.
+        Boolean bugunIsGunuMu = muhasebeClientService.getIsGunuMu(today);
+        if (bugunIsGunuMu != null) {
+            logger.info("BorcIslemleriServiceImpl","bugunIsGunuMu: " + bugunIsGunuMu);
+        }
+        
+        if(bugunIsGunuMu != null && bugunIsGunuMu) {
+            Date previousWorkingDay = muhasebeClientService.getOncekiSonrakiIsGunu(today, -1);
+            List<String> sorgulananBorcDurumEnumList = new ArrayList<>();
+            sorgulananBorcDurumEnumList.add(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod());
+            sorgulananBorcDurumEnumList.add(SorgulananBorcDurumEnum.SORGU_SONUCU_BEKLIYOR.getKod());
+            sorgulananBorcDurumEnumList.add(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR.getKod());
+            sorgulananBorcDurumEnumList.add(SorgulananBorcDurumEnum.TAHSILAT_BEKLIYOR.getKod());
+            List<SorgulananBorcBilgi> sorgulananBorcBilgiList = sorgulananBorcBilgiService.getSorguTarihiAyniOlanSbbList(previousWorkingDay, sorgulananBorcDurumEnumList);
+            Set<Long> tahakkukIdSet = sorgulananBorcBilgiTahakkukService.getUniqueTahakkukList(sorgulananBorcBilgiList);
+            List<Long> tahakkukIdList = new ArrayList<>(tahakkukIdSet);
+            Collections.shuffle(tahakkukIdList);
+            Map<Long, List<SorgulananBorcBilgi>> yenilecekTahakkukIdMap = getYenilecekTahakkukIdList(tahakkukIdList);
+            for (Long tahakkukId : yenilecekTahakkukIdMap.keySet()) {
+                Map<String, SorgulananBorcBilgi> sorgulananBorcBilgiMap = new HashMap<>();
+                List<SorgulananBorcBilgi> tahakkuklaIliskiliSbbList = yenilecekTahakkukIdMap.get(tahakkukId);
+                for (SorgulananBorcBilgi sorgulananBorcBilgi : tahakkuklaIliskiliSbbList) {
+                    if (!sorgulananBorcBilgiMap.containsKey(sorgulananBorcBilgi.getVKnTckN())){
+                        sorgulananBorcBilgiMap.put(sorgulananBorcBilgi.getVKnTckN(), sorgulananBorcBilgi);
+                    }
+                }
+                List<TahakkukDetay> tahakkukDetayList = tahakkukIslemleriService.getTahakkukDetayList(tahakkukId);
+                for (TahakkukDetay tahakkukDetay : tahakkukDetayList) {
+                    if (tahakkukDetay.getIhracatci().isHacizliYadaIflasli()) {
+                        continue;
+                    }
+                    SorgulananBorcBilgi eskiSorgulananBorcBilgi = sorgulananBorcBilgiMap.get(tahakkukDetay.getIhracatci().getTcknVknAsString());
+                    SorgulananBorcBilgi bugunOlusturulanBorcBilgi = sorgulananBorcBilgiService.getSorgulananBorcBilgi(today, tahakkukDetay.getIhracatci().getTcknVknAsString());
+                    if (bugunOlusturulanBorcBilgi == null) {
+                        if(eskiSorgulananBorcBilgi != null) {
+                            bugunOlusturulanBorcBilgi = sbbKaydiYenile(eskiSorgulananBorcBilgi);
+                        }else{
+                            bugunOlusturulanBorcBilgi = borcSorgusuOlustur(tahakkukDetay.getIhracatci().getVkn(), tahakkukDetay.getIhracatci().getTckn());
+                        }
+                    }
+                    if(eskiSorgulananBorcBilgi != null) {
+                        eskiSorgulananBorcBilgiIleTahakkukunBaginiKir(tahakkukId, eskiSorgulananBorcBilgi);
+                    }
+                    yeniSorgulananBorcBilgiIleTahakkukunBaginiKur(tahakkukId, bugunOlusturulanBorcBilgi);
+                }
+            }
+        }
+    }
+
+    private Map<Long, List<SorgulananBorcBilgi>> getYenilecekTahakkukIdList(List<Long> tahakkukIdList) {
+        Map<Long, List<SorgulananBorcBilgi>> yenilenecekTahakkukIdMap = new HashMap<>();
+        int counter = 0;
+        for (Long tahakkukId : tahakkukIdList) {
+            if (counter >= 10) {
+                break;
+            }
+            counter++;
+            List<SorgulananBorcBilgi> tahakkuklaIliskiliSbbList = sorgulananBorcBilgiService.getSorgulananBorcBilgiByTahakkukId(tahakkukId);
+            yenilenecekTahakkukIdMap.put(tahakkukId, tahakkuklaIliskiliSbbList);
+        }
+        return yenilenecekTahakkukIdMap;
+    }
+
+    private void yeniSorgulananBorcBilgiIleTahakkukunBaginiKur(Long tahakkukId, SorgulananBorcBilgi bugunOlusturulanBorcBilgi) {
+        SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk = sorgulananBorcBilgiTahakkukService.get(tahakkukId, bugunOlusturulanBorcBilgi.getId());
+        if(sorgulananBorcBilgiTahakkuk != null){
+            return;
+        }
+        sorgulananBorcBilgiTahakkuk = new SorgulananBorcBilgiTahakkuk();
+        sorgulananBorcBilgiTahakkuk.setSorgulananBorcBilgiId(bugunOlusturulanBorcBilgi.getId());
+        sorgulananBorcBilgiTahakkuk.setTahakkukId(tahakkukId);
+        sorgulananBorcBilgiTahakkuk.setDeleted(false);
+        sorgulananBorcBilgiTahakkukService.kaydet(sorgulananBorcBilgiTahakkuk);
+    }
+
+    private void eskiSorgulananBorcBilgiIleTahakkukunBaginiKir(Long tahakkukId, SorgulananBorcBilgi eskiSorgulananBorcBilgi) throws Exception {
+        List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(eskiSorgulananBorcBilgi.getId());
+        if(sorgulananBorcBilgiTahakkukList.size() == 1){
+            SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk =  sorgulananBorcBilgiTahakkukList.get(0);
+            if(sorgulananBorcBilgiTahakkuk.getTahakkukId().longValue() == tahakkukId.longValue()){
+                sorgulananBorcBilgiService.sil(eskiSorgulananBorcBilgi);
+                logger.info("BorcIslemleriServiceImpl",eskiSorgulananBorcBilgi.getId() + " id'sine sahip sorgulanan Borç Bilgi nesnesi silindi");
+            }
+        }
+
+        for (SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+            if(sorgulananBorcBilgiTahakkuk.getTahakkukId().longValue() == tahakkukId.longValue()){
+                sorgulananBorcBilgiTahakkukService.sil(sorgulananBorcBilgiTahakkuk.getId());
+                logger.info("BorcIslemleriServiceImpl",sorgulananBorcBilgiTahakkuk.getId() + " id'sine sahip sorgulanan Borç Bilgi Tahakkuk nesnesi silindi");
+                break;
+            }
+        }
+    }
+
+    private SorgulananBorcBilgi sbbKaydiYenile(SorgulananBorcBilgi sorgulananBorcBilgi) {
+        Date today = new Date();
+        SorgulananBorcBilgi yeniSorgulananBorcBilgi = new SorgulananBorcBilgi();
+        yeniSorgulananBorcBilgi.setSgkDosyaId(null);
+        if(StringUtils.isNotBlank(sorgulananBorcBilgi.getGibDosyaId()) && !sorgulananBorcBilgi.getGibDosyaId().equals("*")) {
+            GibBorcSorgu ayniDosyaIdliEnEskiBorcSorgu = gibBorcSorguService.getGibBorcSorguByDosyaId(sorgulananBorcBilgi.getGibDosyaId());
+            if(ayniDosyaIdliEnEskiBorcSorgu != null) {
+                LocalDate bugun = today.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+                LocalDate ilkAyniGibDosyaIdliSorguTarihi = ayniDosyaIdliEnEskiBorcSorgu.getSorguTarihi().toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+                long fark = Math.abs(ChronoUnit.DAYS.between(bugun, ilkAyniGibDosyaIdliSorguTarihi));
+                logger.info("BorcIslemleriServiceImpl",ayniDosyaIdliEnEskiBorcSorgu.getGibDosyaId() + " GibDosyaIdsi ile atılmış ilk kaydın tarihi " + ilkAyniGibDosyaIdliSorguTarihi
+                        + " ve bugün " + bugun + " ile arasındaki gün farkı: " + fark);
+                if(fark < 15) {
+                    GibBorcSorgu gibBorcSorguFromDb = gibBorcSorguService.getGibBorcSorgu(sorgulananBorcBilgi.getTckn(), sorgulananBorcBilgi.getVkn(), today);
+                    if(gibBorcSorguFromDb == null)  {
+                        GibBorcSorgu gibBorcSorgu = new GibBorcSorgu();
+                        gibBorcSorgu.setYaratanKullaniciId(0);
+                        gibBorcSorgu.setYaratmaZaman(LocalDateTime.now());
+                        gibBorcSorgu.setGuncelleyenKullaniciId(0);
+                        gibBorcSorgu.setGuncellemeZaman(LocalDateTime.now());
+                        gibBorcSorgu.setSorguTarihi(today);
+                        gibBorcSorgu.setVkNo(sorgulananBorcBilgi.getVkn());
+                        gibBorcSorgu.setTckNo(sorgulananBorcBilgi.getTckn());
+                        gibBorcSorgu.setGibDosyaId(sorgulananBorcBilgi.getGibDosyaId());
+                        gibBorcSorguService.kaydet(gibBorcSorgu);
+                    }
+                }
+                else {
+                    sorgulananBorcBilgi.setGibBorcDosyasiIslendi(false);
+                }
+            }
+        }
+
+        yeniSorgulananBorcBilgi.setGibDosyaId(null);
+        yeniSorgulananBorcBilgi.setToplamGibBorcu(BigDecimal.ZERO);
+        yeniSorgulananBorcBilgi.setGibMutabakatSaglandi(false);
+        yeniSorgulananBorcBilgi.setVergiDaireKod(null);
+        yeniSorgulananBorcBilgi.setVergiDairesiAdi(null);
+        yeniSorgulananBorcBilgi.setVergiDairesiIbanNo(null);
+        yeniSorgulananBorcBilgi.setGibBorcDosyasiIslendi(false);
+        yeniSorgulananBorcBilgi.setSgkIbanNo(Constants.SGK_IBAN);
+        yeniSorgulananBorcBilgi.setSorguTarihi(today);
+        yeniSorgulananBorcBilgi.setTckn(sorgulananBorcBilgi.getTckn());
+        yeniSorgulananBorcBilgi.setVkn(sorgulananBorcBilgi.getVkn());
+        yeniSorgulananBorcBilgi.setToplamSgkBorcu(BigDecimal.ZERO);
+        yeniSorgulananBorcBilgi.setOdenenSgkBorcu(BigDecimal.ZERO);
+        yeniSorgulananBorcBilgi.setOdenecekSgkBorcu(BigDecimal.ZERO);
+        yeniSorgulananBorcBilgi.setOdenenGibBorcu(BigDecimal.ZERO);
+        yeniSorgulananBorcBilgi.setOdenecekGibBorcu(BigDecimal.ZERO);
+        yeniSorgulananBorcBilgi.setDeleted(false);
+        yeniSorgulananBorcBilgi.setSgkBorcDosyasiIslendi(false);
+        yeniSorgulananBorcBilgi.setGibBorcDosyasiIslendi(false);
+        yeniSorgulananBorcBilgi.setBorclarHakediseGoreDagitildi(false);
+        yeniSorgulananBorcBilgi.setSgkMutabakatSaglandi(false);
+        yeniSorgulananBorcBilgi.setGibMutabakatSaglandi(false);
+        yeniSorgulananBorcBilgi.setTahsilatTarihi(null);
+        yeniSorgulananBorcBilgi.setTahsilatId(null);
+        yeniSorgulananBorcBilgi.setKaydinIlkAtildigiTarih(sorgulananBorcBilgi.getKaydinIlkAtildigiTarih());
+        yeniSorgulananBorcBilgi.setSorguDurum(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod());
+        yeniSorgulananBorcBilgi.setGuncelleyenKullaniciId(0);
+        return sorgulananBorcBilgiService.kaydet(yeniSorgulananBorcBilgi);
+    }
+
+
+    private SorgulananBorcBilgi borcSorgusuOlustur(String vkNo, String tckNo) {
+        Date today = new Date();
+        SorgulananBorcBilgi sorgulananBorcBilgi = new SorgulananBorcBilgi();
+        sorgulananBorcBilgi.setSgkDosyaId(null);
+        GibBorcSorgu gibBorcSorguFromDb = gibBorcSorguService.getGibBorcSorgu(sorgulananBorcBilgi.getTckn(), sorgulananBorcBilgi.getVkn(), today);
+        if(gibBorcSorguFromDb == null)  {
+            sorgulananBorcBilgi.setGibDosyaId(null);
+        } else {
+            sorgulananBorcBilgi.setGibDosyaId(gibBorcSorguFromDb.getGibDosyaId());
+        }
+        sorgulananBorcBilgi.setSorguTarihi(today);
+        sorgulananBorcBilgi.setSorguDurum(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod());
+        sorgulananBorcBilgi.setToplamGibBorcu(BigDecimal.ZERO);
+        sorgulananBorcBilgi.setToplamSgkBorcu(BigDecimal.ZERO);
+        sorgulananBorcBilgi.setOdenecekGibBorcu(BigDecimal.ZERO);
+        sorgulananBorcBilgi.setOdenecekSgkBorcu(BigDecimal.ZERO);
+        sorgulananBorcBilgi.setOdenenSgkBorcu(BigDecimal.ZERO);
+        sorgulananBorcBilgi.setOdenenGibBorcu(BigDecimal.ZERO);
+        sorgulananBorcBilgi.setTckn(tckNo);
+        sorgulananBorcBilgi.setVkn(vkNo);
+        sorgulananBorcBilgi.setSgkIbanNo(Constants.SGK_IBAN);
+        sorgulananBorcBilgi.setSgkBorcDosyasiIslendi(false);
+        sorgulananBorcBilgi.setGibBorcDosyasiIslendi(false);
+        sorgulananBorcBilgi.setBorclarHakediseGoreDagitildi(false);
+        sorgulananBorcBilgi.setSgkMutabakatSaglandi(false);
+        sorgulananBorcBilgi.setGibMutabakatSaglandi(false);
+        sorgulananBorcBilgi.setDeleted(false);
+        sorgulananBorcBilgi.setYaratanKullaniciId(0);
+        sorgulananBorcBilgi.setYaratmaZaman(LocalDateTime.now());
+        sorgulananBorcBilgi.setGuncelleyenKullaniciId(0);
+        sorgulananBorcBilgi.setGuncellemeZaman(LocalDateTime.now());
+        sorgulananBorcBilgi.setKaydinIlkAtildigiTarih(today);
+        sorgulananBorcBilgi = sorgulananBorcBilgiService.kaydet(sorgulananBorcBilgi);
+        return sorgulananBorcBilgi;
+    }
+
+    private void borcBilgisiKaydet(List<Provizyon> provizyonList, BigDecimal odenecekSgkBorcu, BigDecimal odenecekGibBorcu,
+                                   SorgulananBorcBilgi sorgulananBorcBilgi) throws Exception {
+        logger.info("BorcIslemleriServiceImpl","borcBilgisiKaydet", "Borç bilgisi kaydetme işlemleri başladı.");
+        // Buraya gelen provizyonList hakedişe göre büyükten küçüğe sıralı.
+        BigDecimal kalanGibBorcu = odenecekGibBorcu;
+        BigDecimal kalanSgkBorcu = odenecekSgkBorcu;
+        for (Provizyon provizyon : provizyonList) {
+            BigDecimal provizyonTutar = provizyon.getHakedisTutari();
+            // Provizyon, ilk olarak GİB borcuna yediriliyor.
+            if (kalanGibBorcu.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal currentBorcMiktari;
+                if (provizyonTutar.compareTo(kalanGibBorcu) > 0) {
+                    currentBorcMiktari = kalanGibBorcu;
+                    provizyonTutar = provizyonTutar.subtract(kalanGibBorcu);
+                    kalanGibBorcu = BigDecimal.ZERO;
+                } else {
+                    // provizyon: 10 bin, gib borcu: 10 bin ya da 11 bin
+                    currentBorcMiktari = provizyonTutar;
+                    kalanGibBorcu = kalanGibBorcu.subtract(provizyonTutar);
+                    provizyonTutar = BigDecimal.ZERO; // ilgili provizyonun tamamı GİB borcuna gitmiş oldu.
+                }
+                borcBilgiKaydet(provizyon, currentBorcMiktari, BorcTipEnum.GIB, sorgulananBorcBilgi);
+            }
+
+            // GİB ödemesinden sonra provizyonda hala para kaldıysa SGK borcu ödenecek
+            if (provizyonTutar.compareTo(BigDecimal.ZERO) > 0) {
+                if (kalanSgkBorcu.compareTo(BigDecimal.ZERO) > 0) {
+                    // SGK borcu kaldıysa
+                    BigDecimal currentBorcMiktari;
+                    if (provizyonTutar.compareTo(kalanSgkBorcu) > 0) {
+                        // provizyonda kalan tutar: 5 bin, kalan sgk borcu: 3 bin ise
+                        currentBorcMiktari = kalanSgkBorcu;
+                        kalanSgkBorcu = BigDecimal.ZERO; // sgk borcu artık kalmadı.
+                    } else {
+                        // provizyonda kalan tutar: 5 bin, kalan sgk borcu: 5 bin ya da 6 bin ise
+                        currentBorcMiktari = provizyonTutar;
+                        kalanSgkBorcu = kalanSgkBorcu.subtract(provizyonTutar);
+                    }
+                    // provizyonTutar'ın güncellenmesine gerek yok.
+                    borcBilgiKaydet(provizyon, currentBorcMiktari, BorcTipEnum.SGK, sorgulananBorcBilgi);
+                }
+            }
+        }
+    }
+
+    private void borcBilgiKaydet(Provizyon provizyon, BigDecimal borcMiktari, BorcTipEnum borcTipi, SorgulananBorcBilgi sorgulananBorcBilgi) throws Exception {
+        logger.info("BorcIslemleriServiceImpl","borcBilgiKaydet", "Borç bilgi kaydetme işlemi başladı.");
+        BorcBilgi borcBilgisi = new BorcBilgi();
+        borcBilgisi.setSubeId(String.valueOf(provizyon.getSubeId().intValue()));
+        borcBilgisi.setProvizyon(provizyon);
+        int bkod = 0;
+        if (BorcTipEnum.SGK.equals(borcTipi)) {
+            bkod = Integer.parseInt(sorgulananBorcBilgi.getSgkIbanNo().substring(4, 9));
+            borcBilgisi.setEftHesapNo(sorgulananBorcBilgi.getSgkIbanNo());
+            borcBilgisi.setAliciAdi(Constants.SGK_ADI);
+            borcBilgisi.setBorcTipi(BorcTipEnum.SGK.getKod());
+            borcBilgisi.setSgkNumarasi(BigDecimal.ZERO); // TODO: GÖKHAN
+        } else if (BorcTipEnum.GIB.equals(borcTipi)) {
+            bkod = Integer.parseInt(sorgulananBorcBilgi.getVergiDairesiIbanNo().substring(4, 9));
+            borcBilgisi.setEftHesapNo(sorgulananBorcBilgi.getVergiDairesiIbanNo());
+            borcBilgisi.setAliciAdi(sorgulananBorcBilgi.getVergiDairesiAdi());
+            borcBilgisi.setBorcTipi(BorcTipEnum.GIB.getKod());
+            borcBilgisi.setVergiDaireKod(sorgulananBorcBilgi.getVergiDaireKod());
+        }
+        EftSube eftSube = bankaSubeService.getBankaSube(String.valueOf(bkod), String.valueOf(Constants.EFT_IBAN_SUBEKODU));
+        borcBilgisi.setEftBankaKod(eftSube.getBankaKod());
+        borcBilgisi.setEftSubeKod(eftSube.getKod());
+        borcBilgisi.setTutar(borcMiktari);
+        borcBilgisi.setKalanTutar(borcMiktari);
+        borcBilgisi.setIslemDurum(BorcIslemEnum.YENI_GIRILMIS.getKod());
+        borcBilgisi.setAciklama1(null);
+        borcBilgisi.setAciklama2(null);
+        borcBilgisi.setOdemeMuhasebeIstekId(null);
+        borcBilgisi.setOdemeHareketReferansId(null);
+        borcBilgisi.setGirisSicil(provizyon.getOnaySicil());
+        borcBilgisi.setOdemeSicil(null);
+        borcBilgisi.setDeleted(false);
+        borcBilgisi.setIptalSicil(null);
+        borcBilgisi.setGirisZaman(LocalDateTime.now());
+        borcBilgisi.setOdemeZaman(null);
+        borcBilgisi.setIptalZaman(null);
+        borcBilgisi.setYaratanKullaniciId(Integer.parseInt(provizyon.getOnaySicil()));
+        borcBilgisi.setYaratmaZaman(LocalDateTime.now());
+        borcBilgisi.setGuncelleyenKullaniciId(Integer.parseInt(provizyon.getOnaySicil()));
+        borcBilgisi.setGuncellemeZaman(LocalDateTime.now());
+        borcBilgisiService.save(borcBilgisi);
+    }
+
+    private List<Long> getOdenmemisTahakkukIdList(List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList) {
+        logger.info("BorcIslemleriServiceImpl","getOdenmemisTahakkukIdList", "Ödenmemiş Tahakkuk id listesi getirme işlemi başladı.");
+        Set<Long> tahakkukIdSet = new HashSet<>();
+        for (SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+            List<ProvizyonTalep> provizyonTalepList = provizyonTalepService.getProvizyonTalepByTahakkukId(sorgulananBorcBilgiTahakkuk.getTahakkukId());
+            for (ProvizyonTalep provizyonTalep : provizyonTalepList) {
+                if (provizyonTalep.getDurum().equals(ProvizyonTalepDurum.OdemeyeHazir.getKod())) {
+                    tahakkukIdSet.add(sorgulananBorcBilgiTahakkuk.getTahakkukId());
+                }
+            }
+        }
+        return new ArrayList<>(tahakkukIdSet);
+    }
+
+    private BigDecimal getToplamTutarInProvizyonListesi(List<Provizyon> provizyonList) {
+        logger.info("BorcIslemleriServiceImpl","getToplamTutarInProvizyonListesi", "Provizyon listesindeki toplam tutarı bulma işlemi başladı.");
+        BigDecimal totalMiktar = BigDecimal.ZERO;
+        if (provizyonList != null) {
+            for (Provizyon provizyon : provizyonList) {
+                totalMiktar = totalMiktar.add(provizyon.getHakedisTutari());
+            }
+        }
+        return totalMiktar;
+    }
+
+    private BigDecimal getToplamTutarInMahsupProvizyonListesi(List<Provizyon> provizyonList) {
+        logger.info("BorcIslemleriServiceImpl","getToplamTutarInMahsupProvizyonListesi", "Mahsup Provizyon listesindeki toplam tutarı bulma işlemi başladı.");
+        BigDecimal totalMiktar = BigDecimal.ZERO;
+        if (provizyonList != null) {
+            for (Provizyon provizyon : provizyonList) {
+                if(provizyon.getKarar().isMahsupKarar()) {
+                    totalMiktar = totalMiktar.add(provizyon.getHakedisTutari());
+                }
+            }
+        }
+        return totalMiktar;
+    }
+
+    private void provizyonListesiniMiktaraGoreBuyuktenKucugeSirala(List<Provizyon> provizyonList) {
+        provizyonList.sort(Comparator.comparing(Provizyon::getHakedisTutari).reversed());
+        logger.info("BorcIslemleriServiceImpl","provizyonListesiniMiktaraGoreBuyuktenKucugeSirala", "Provizyon listesi hak edişlerine göre büyükten küçüğe sıralandı.");
+    }
+
+    public String getTahakkukBilgileri(SorgulananBorcBilgi sorgulananBilgi) {
+        List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(sorgulananBilgi.getId());
+        StringBuilder tahakkukBilgileriStr = new StringBuilder();
+        for(SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+            Tahakkuk tahakkuk = tahakkukIslemleriService.getTahakkuk(sorgulananBorcBilgiTahakkuk.getTahakkukId());
+            if(tahakkuk != null)  {
+                tahakkukBilgileriStr.append(" - ")
+                        .append(KararTipiEnum.getBykod(tahakkuk.getTur())).append(" türü, ")
+                        .append(tahakkuk.getYil()).append(" yılı, ")
+                        .append(tahakkuk.getBelgeNo()).append(" belge numaralı - ");
+            }
+        }
+        tahakkukBilgileriStr.append(" tahakkuklarında hak edişi bulunan ");
+        return tahakkukBilgileriStr.toString();
+    }
+
+    public String getOdenebilirTahakkukBilgileri(SorgulananBorcBilgi sorgulananBilgi) {
+        List<SorgulananBorcBilgiTahakkuk> sorgulananBorcBilgiTahakkukList = sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(sorgulananBilgi.getId());
+        StringBuilder tahakkukBilgileriStr = new StringBuilder();
+        for(SorgulananBorcBilgiTahakkuk sorgulananBorcBilgiTahakkuk : sorgulananBorcBilgiTahakkukList) {
+            Tahakkuk tahakkuk = tahakkukIslemleriService.getTahakkuk(sorgulananBorcBilgiTahakkuk.getTahakkukId());
+            if(tahakkuk != null && isTahakkukArtikOdenebilir(tahakkuk.getId()))  {
+                tahakkukBilgileriStr.append(" - ")
+                        .append(KararTipiEnum.getBykod(tahakkuk.getTur())).append(" türü, ")
+                        .append(tahakkuk.getYil()).append(" yılı, ")
+                        .append(tahakkuk.getBelgeNo()).append(" belge numaralı - ");
+            }
+        }
+        tahakkukBilgileriStr.append(" ödenebilir tahakkuklarında hak edişi bulunan ");
+        return tahakkukBilgileriStr.toString();
+    }
+
+    private boolean isTahakkukArtikOdenebilir(Long tahakkukId) {
+        List<SorgulananBorcBilgi> sorgulananBorcBilgiList = sorgulananBorcBilgiService.getSorgulananBorcBilgiByTahakkukId(tahakkukId);
+        return !sorgulananBorcBilgiList.isEmpty() && sadeceAltiVeOnVar(sorgulananBorcBilgiList) && odemeyeHazirMi(tahakkukId);
+    }
+
+    private boolean sadeceAltiVeOnVar(List<SorgulananBorcBilgi> sbbList) {
+        boolean sadeceAltiVeOnVar = true;
+
+        for(SorgulananBorcBilgi sbb : sbbList) {
+            if(!(sbb.getSorguDurum().equals("6") || sbb.getSorguDurum().equals("10"))) {
+                sadeceAltiVeOnVar = false;
+                break;
+            }
+        }
+
+        return sadeceAltiVeOnVar;
+    }
+
+    private boolean odemeyeHazirMi(Long tahakkukId) {
+        boolean odemeyeHazirMi = false;
+        List<ProvizyonTalep> provizyonTalepler = provizyonTalepService.getProvizyonTalepByTahakkukId(tahakkukId);
+        for (ProvizyonTalep provizyonTalep : provizyonTalepler) {
+            if (provizyonTalep.getDurum().equals(ProvizyonTalepDurum.OdemeyeHazir.getKod())) {
+                odemeyeHazirMi = true;
+                break;
+            }
+        }
+
+        return odemeyeHazirMi;
+    }
+}
+
+
+----sonar
+
+
+C:\Users\k017253\IdeaProjects\ogm\ogmdfifse\target\classes\spring\mailSenderBeans.xml
 [DEBUG] Copying file static\banner.txt
 [DEBUG] file banner.txt has a filtered file extension
 [DEBUG] Using 'UTF-8' encoding to copy filtered resource 'banner.txt'.
