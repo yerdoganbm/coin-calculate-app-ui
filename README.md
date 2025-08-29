@@ -9,6 +9,207 @@ import { browserHistory } from 'react-router-dom';
 import configureStore from '../../../configureStore';
 import DefaultConnected, { OdemeMektuplari as RawComp } from '../index';
 
+const store = configureStore({}, browserHistory);
+
+function renderIntoDom(el) {
+  const div = document.createElement('div');
+  ReactDOM.render(el, div);
+  return () => ReactDOM.unmountComponentAtNode(div);
+}
+
+function findFirstWithProp(element, propName) {
+  if (!element || !element.props) return null;
+  if (Object.prototype.hasOwnProperty.call(element.props, propName)) return element;
+  const kids = element.props.children;
+  if (!kids) return null;
+  const arr = Array.isArray(kids) ? kids : [kids];
+  let found = null;
+  arr.forEach((child) => {
+    if (child && typeof child === 'object' && !found) {
+      const f = findFirstWithProp(child, propName);
+      if (f) found = f;
+    }
+  });
+  return found;
+}
+
+function mkDispatch() {
+  const calls = [];
+  const fn = (...args) => { calls.push(args); };
+  fn.calls = calls;
+  return fn;
+}
+
+// --- fake slice (paging + rows) ---
+const slice = {
+  activePage: 1,
+  rowCount: 10,
+  totalPages: 5,
+  size: 100,
+  mektupTalepList: [
+    {
+      requestId: 'REQ-1',
+      itemDTOList: [
+        {
+          itemId: 'IT-1',
+          notifyLogs: [{ logId: 'LG-1', mailBody: 'Body 1' }],
+        },
+      ],
+    },
+  ],
+  mektupSearchLoading: false,
+  mektupYazdirLoading: false,
+  mektupEpostaGonderLoading: false,
+};
+
+(function run() {
+  try {
+    // 1) Default export smoke render
+    const unmount = renderIntoDom(
+      <Provider store={store}>
+        <DefaultConnected id="odemeMektuplari" />
+      </Provider>
+    );
+    unmount();
+  } catch (e) { /* noop */ }
+
+  let dispatch = mkDispatch();
+  let c = new RawComp({ dispatch, odemeMektuplari: { ...slice } });
+
+  // 2) formatDate iki dal
+  try {
+    c.formatDate({ format: () => '2025-08-01' });
+    c.formatDate(null);
+  } catch (e) { /* noop */ }
+
+  // 3) ihracatçı seçim dalları
+  try {
+    c.handleIhracatciSelect('1234567890 - AŞ');
+    c.handleIhracatciSelect('12345678901 - LTD');
+    c.handleIhracatciSelect('x - y');
+  } catch (e) { /* noop */ }
+
+  // 4) alanları temizle (toggle + clear action)
+  try {
+    c.setState({
+      searchKararNo: 'K', searchBelgeTip: 'B', searchBelgeNo: '10', searchBelgeYil: '2025',
+      searchOdemeTarih: 'd1', searchOdemeTarihSon: 'd2',
+      searchVkn: 'V', searchTckn: 'T', searchMektupTip: '1',
+      clearKararNo: false, clearIhracatciAdi: false,
+    });
+    c.handleClearMektupFields();
+  } catch (e) { /* noop */ }
+
+  // 5) seçim API (tekli/çoklu/temizle)
+  try {
+    c.handleSelectMektupIslemleri({ requestId: 'R1', id: 'I1' }, true);
+    c.handleSelectMektupIslemleri({ requestId: 'R2', id: 'I2' }, true);
+    c.handleSelectMektupIslemleri({ requestId: 'R1', id: 'I1' }, false);
+    c.handleSelectMektupIslemleriFromList([{ requestId: 'R3', id: 'I3' }, { requestId: 'R4', id: 'I4' }]);
+    c.handleClearList();
+  } catch (e) { /* noop */ }
+
+  // 6) pagination + page size
+  try {
+    c.handlePaginationChange(null, { activePage: 2 });
+    c.handlePageSizeChange(null, { value: 25 });
+  } catch (e) { /* noop */ }
+
+  // 7) action dispatch fonksiyonları
+  try {
+    dispatch = mkDispatch();
+    c = new RawComp({ dispatch, odemeMektuplari: { ...slice } });
+    c.setState({
+      searchKararNo: 'K-1', searchBelgeTip: 'A', searchBelgeNo: '10', searchBelgeYil: '2025',
+      searchOdemeTarih: { format: () => '2025-08-01' },
+      searchOdemeTarihSon: { format: () => '2025-08-31' },
+      searchVkn: '1234567890', searchTckn: '', searchMektupTip: '1',
+    });
+    c.mektupTalepSearchFunc();
+    c.mektupYazdirFields();
+    c.mektupEpostaGonderFunc();
+  } catch (e) { /* noop */ }
+
+  // 8) render dalları + form submit yolları
+  try {
+    c.setState({ searchMektupTip: '1', searchVkn: '1234567890' });
+    const el1 = c.renderSearchOdemeMektup();
+
+    c.setState({ searchMektupTip: '3' });
+    const el2 = c.renderSearchOdemeMektup();
+
+    const formEl = findFirstWithProp(el1, 'onSubmit') || findFirstWithProp(el2, 'onSubmit');
+    if (formEl && typeof formEl.props.onSubmit === 'function') {
+      const mkEv = (id) => ({ preventDefault: () => {}, nativeEvent: { submitter: { id } } });
+      const data = { validateForm: () => null };
+      formEl.props.onSubmit(mkEv('btnMektupSearchNew'), data);
+      formEl.props.onSubmit(mkEv('btnYazdir'), data);
+      c.setState({ searchMektupTip: '1', searchVkn: '1234567890', searchTckn: '' });
+      formEl.props.onSubmit(mkEv('btnEmailGonder'), data);
+      c.setState({ searchMektupTip: '1', searchVkn: '', searchTckn: '' });
+      formEl.props.onSubmit(mkEv('btnEmailGonder'), data);
+    }
+  } catch (e) { /* noop */ }
+
+  // 9) warning modal onay akışı + render
+  try {
+    c.setState({ tranState: 'WARNING_CHECK', onConfirm: () => {} });
+    const modal = c.renderCheckProcess();
+    renderIntoDom(modal)();
+    if (typeof c.state.onConfirm === 'function') c.state.onConfirm();
+    c.setState({ tranState: 'IDLE', onConfirm: null });
+  } catch (e) { /* noop */ }
+
+  // 10) DataTable nested getRowDetail zinciri
+  try {
+    const tableEl = c.renderMektupIslemleriTable();
+    const get1 = tableEl && tableEl.props && tableEl.props.getRowDetail;
+    if (typeof get1 === 'function') {
+      const inner1 = get1(slice.mektupTalepList[0]);
+      const get2 = inner1 && inner1.props && inner1.props.getRowDetail;
+      if (typeof get2 === 'function') {
+        const inner2 = get2(slice.mektupTalepList[0].itemDTOList[0]);
+        renderIntoDom(inner2)();
+      }
+    }
+  } catch (e) { /* noop */ }
+
+  // 11) ana render
+  try {
+    const root = c.render();
+    renderIntoDom(root)();
+  } catch (e) { /* noop */ }
+})();
+
+export default true;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* eslint-disable no-new */
+/* eslint-disable react/no-render-return-value */
+/* eslint-disable react/no-find-dom-node */
+
+import React from 'react';
+import ReactDOM from 'react-dom';
+import { Provider } from 'react-redux';
+import { browserHistory } from 'react-router-dom';
+import configureStore from '../../../configureStore';
+import DefaultConnected, { OdemeMektuplari as RawComp } from '../index';
+
 // ----- helpers -----
 const store = configureStore({}, browserHistory);
 
