@@ -1,4 +1,71 @@
-"jest": {
+// jest.config.js
+module.exports = {
+  // Testleri arayacağı kök – senin dizin hiyerarşine uygun
+  roots: ['<rootDir>/src/main/javascript'],
+
+  // .js ve .jsx test dosyalarını eşle
+  testMatch: [
+    '**/__tests__/**/*.[jt]s?(x)',
+    '**/?(*.)+(spec|test).[jt]s?(x)',
+  ],
+
+  // jsdom: React bileşen testleri için tarayıcı benzeri ortam
+  testEnvironment: 'jsdom',
+
+  // Babel ile .js/.jsx dosyalarını dönüştür
+  transform: {
+    '^.+\\.[jt]sx?$': 'babel-jest',
+  },
+
+  // Çözümlenecek uzantılar
+  moduleFileExtensions: ['js', 'jsx', 'json'],
+
+  // import kısayolları için (mevcuttaki ayarını koruyorum)
+  moduleDirectories: ['node_modules', 'app'],
+
+  // Styles ve medya dosyalarını mockla (mevcuttaki ayarını koruyorum)
+  moduleNameMapper: {
+    '\\.(css|less|styl|scss|sass)$':
+      '<rootDir>/internals/mocks/cssModule.js',
+    '\\.(jpg|jpeg|png|gif|eot|otf|webp|svg|ttf|woff|woff2|mp4|webm|wav|mp3|m4a|aac|oga)$':
+      '<rootDir>/internals/mocks/image.js',
+  },
+
+  // Coverage (mevcuttaki eşiklerini koruyorum)
+  collectCoverageFrom: [
+    'app/**/*.{js,jsx}',
+    '!app/**/?(*.)+(test|spec).[jt]s?(x)',
+  ],
+  coverageThreshold: {
+    global: {
+      statements: 20,
+      branches: 20,
+      functions: 20,
+      lines: 20,
+    },
+  },
+  collectCoverage: true,
+  coverageDirectory: 'coverage',
+  coverageReporters: ['json', 'text', 'lcov'],
+
+  // Test kurulum dosyaları (eski setupTestFrameworkScriptFile yerine)
+  setupFilesAfterEnv: [
+    '<rootDir>/internals/testing/test-bundler.js',
+    '<rootDir>/internals/testing/enzyme-setup.js',
+  ],
+  // Jest başlamadan önce polyfill gerekiyorsa (mevcuttaki ayarını koruyorum)
+  setupFiles: ['raf/polyfill'],
+
+  // Enzyme snapshotlar için (mevcuttaki ayarını koruyorum)
+  snapshotSerializers: ['enzyme-to-json/serializer'],
+
+  // Raporlayıcı (mevcuttaki ayarını koruyorum)
+  testResultsProcessor: './resultsProcessor',
+};
+
+
+
+jest": {
   "roots": ["<rootDir>/src/main/javascript"],
   "testMatch": [
     "**/__tests__/**/*.[jt]s?(x)",
