@@ -1,3 +1,15 @@
+"jest": {
+  "roots": ["<rootDir>/src/main/javascript"],
+  "testMatch": [
+    "**/__tests__/**/*.[jt]s?(x)",
+    "**/?(*.)+(spec|test).[jt]s?(x)"
+  ],
+  "moduleFileExtensions": ["js", "jsx", "json"],
+  "transform": {
+    "^.+\\.[jt]sx?$": "babel-jest"
+  }
+}
+
 // __tests__/OdemeMektuplari.test.jsx
 /* eslint-disable react/no-is-mounted */
 
