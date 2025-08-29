@@ -1,3 +1,57 @@
+// jest.config.js  (Jest 23.x uyumlu)
+module.exports = {
+  roots: ['<rootDir>/src/main/javascript'],
+
+  // .js ve .jsx testlerini yakala
+  testMatch: [
+    '**/__tests__/**/*.[jt]s?(x)',
+    '**/?(*.)+(spec|test).[jt]s?(x)',
+  ],
+
+  testEnvironment: 'jsdom',
+
+  transform: {
+    '^.+\\.[jt]sx?$': 'babel-jest',
+  },
+
+  moduleFileExtensions: ['js', 'jsx', 'json'],
+  moduleDirectories: ['node_modules', 'app'],
+
+  moduleNameMapper: {
+    '\\.(css|less|styl|scss|sass)$': '<rootDir>/internals/mocks/cssModule.js',
+    '\\.(jpg|jpeg|png|gif|eot|otf|webp|svg|ttf|woff|woff2|mp4|webm|wav|mp3|m4a|aac|oga)$':
+      '<rootDir>/internals/mocks/image.js',
+  },
+
+  collectCoverageFrom: [
+    'app/**/*.{js,jsx}',
+    '!app/**/?(*.)+(test|spec).[jt]s?(x)',
+  ],
+  coverageThreshold: {
+    global: { statements: 20, branches: 20, functions: 20, lines: 20 },
+  },
+  collectCoverage: true,
+  coverageDirectory: 'coverage',
+  coverageReporters: ['json', 'text', 'lcov'],
+
+  // NOTE: Jest 23'te bu alan
+  setupTestFrameworkScriptFile: '<rootDir>/internals/testing/enzyme-setup.js',
+
+  setupFiles: ['raf/polyfill'],
+  snapshotSerializers: ['enzyme-to-json/serializer'],
+  testResultsProcessor: './resultsProcessor',
+};
+
+
+
+
+
+
+
+
+
+
+
 // jest.config.js
 module.exports = {
   // Testleri arayacağı kök – senin dizin hiyerarşine uygun
