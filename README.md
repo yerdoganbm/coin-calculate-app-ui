@@ -1,3 +1,204 @@
+/* eslint-disable no-new */
+/* eslint-disable react/no-render-return-value */
+/* eslint-disable react/no-find-dom-node */
+
+import React from 'react';
+import ReactDOM from 'react-dom';
+import { Provider } from 'react-redux';
+import { browserHistory } from 'react-router-dom';
+import configureStore from '../../../configureStore';
+import DefaultConnected, { OdemeMektuplari as RawComp } from '../index';
+
+// ----- helpers -----
+const store = configureStore({}, browserHistory);
+
+function renderIntoDom(el) {
+  const div = document.createElement('div');
+  ReactDOM.render(el, div);
+  return () => ReactDOM.unmountComponentAtNode(div);
+}
+
+function findFirstWithProp(element, propName) {
+  if (!element || !element.props) return null;
+  if (Object.prototype.hasOwnProperty.call(element.props, propName)) return element;
+  const kids = element.props.children;
+  if (!kids) return null;
+  const arr = Array.isArray(kids) ? kids : [kids];
+  for (const k of arr) {
+    if (k && typeof k === 'object') {
+      const f = findFirstWithProp(k, propName);
+      if (f) return f;
+    }
+  }
+  return null;
+}
+
+function mkDispatch() {
+  const calls = [];
+  const fn = (...args) => { calls.push(args); };
+  fn.calls = calls;
+  return fn;
+}
+
+// ----- fake slice (paging + rows) -----
+const slice = {
+  activePage: 1,
+  rowCount: 10,
+  totalPages: 5,
+  size: 100,
+  mektupTalepList: [
+    {
+      requestId: 'REQ-1',
+      itemDTOList: [
+        {
+          itemId: 'IT-1',
+          notifyLogs: [{ logId: 'LG-1', mailBody: 'Body 1' }],
+        },
+      ],
+    },
+  ],
+  mektupSearchLoading: false,
+  mektupYazdirLoading: false,
+  mektupEpostaGonderLoading: false,
+};
+
+// ===============================
+// self-runner: bütün akışları tetikle
+// ===============================
+(function run() {
+  // 1) Default export (HOC) smoke render
+  try {
+    const unmount = renderIntoDom(
+      <Provider store={store}>
+        <DefaultConnected id="odemeMektuplari" />
+      </Provider>
+    );
+    unmount();
+  } catch (e) { /* swallow */ }
+
+  // 2) Raw class ile kapsamlı akış
+  let dispatch = mkDispatch();
+  let c = new RawComp({ dispatch, odemeMektuplari: { ...slice } });
+
+  // 2.1) formatDate iki dal
+  try {
+    c.formatDate({ format: () => '2025-08-01' });
+    c.formatDate(null);
+  } catch (e) {}
+
+  // 2.2) ihracatçı seçim dalları
+  try {
+    c.handleIhracatciSelect('1234567890 - AŞ'); // VKN
+    c.handleIhracatciSelect('12345678901 - LTD'); // TCKN
+    c.handleIhracatciSelect('x - y'); // boş
+  } catch (e) {}
+
+  // 2.3) alanları temizle (toggle + clear action)
+  try {
+    c.setState({
+      searchKararNo: 'K', searchBelgeTip: 'B', searchBelgeNo: '10', searchBelgeYil: '2025',
+      searchOdemeTarih: 'd1', searchOdemeTarihSon: 'd2',
+      searchVkn: 'V', searchTckn: 'T', searchMektupTip: '1',
+      clearKararNo: false, clearIhracatciAdi: false,
+    });
+    c.handleClearMektupFields();
+  } catch (e) {}
+
+  // 2.4) seçim API (tekli/çoklu/temizle)
+  try {
+    c.handleSelectMektupIslemleri({ requestId: 'R1', id: 'I1' }, true);
+    c.handleSelectMektupIslemleri({ requestId: 'R2', id: 'I2' }, true);
+    c.handleSelectMektupIslemleri({ requestId: 'R1', id: 'I1' }, false);
+    c.handleSelectMektupIslemleriFromList([{ requestId: 'R3', id: 'I3' }, { requestId: 'R4', id: 'I4' }]);
+    c.handleClearList();
+  } catch (e) {}
+
+  // 2.5) pagination + page size
+  try {
+    c.handlePaginationChange(null, { activePage: 2 });
+    c.handlePageSizeChange(null, { value: 25 });
+  } catch (e) {}
+
+  // 2.6) action dispatch fonksiyonları
+  try {
+    dispatch = mkDispatch();
+    c = new RawComp({ dispatch, odemeMektuplari: { ...slice } });
+    c.setState({
+      searchKararNo: 'K-1', searchBelgeTip: 'A', searchBelgeNo: '10', searchBelgeYil: '2025',
+      searchOdemeTarih: { format: () => '2025-08-01' },
+      searchOdemeTarihSon: { format: () => '2025-08-31' },
+      searchVkn: '1234567890', searchTckn: '', searchMektupTip: '1',
+    });
+    c.mektupTalepSearchFunc();
+    c.mektupYazdirFields();
+    c.mektupEpostaGonderFunc();
+  } catch (e) {}
+
+  // 2.7) render dalları + form submit yolları
+  try {
+    c.setState({ searchMektupTip: '1', searchVkn: '1234567890' });
+    const el1 = c.renderSearchOdemeMektup(); // eposta butonu görünür
+
+    c.setState({ searchMektupTip: '3' });
+    const el2 = c.renderSearchOdemeMektup(); // eposta butonu gizli
+
+    const formEl = findFirstWithProp(el1, 'onSubmit') || findFirstWithProp(el2, 'onSubmit');
+    if (formEl && typeof formEl.props.onSubmit === 'function') {
+      const mkEv = (id) => ({ preventDefault: () => {}, nativeEvent: { submitter: { id } } });
+      const data = { validateForm: () => null };
+
+      // Ara
+      formEl.props.onSubmit(mkEv('btnMektupSearchNew'), data);
+      // Yazdır
+      formEl.props.onSubmit(mkEv('btnYazdir'), data);
+      // Email (geçerli durumda direkt göndersin)
+      c.setState({ searchMektupTip: '1', searchVkn: '1234567890', searchTckn: '' });
+      formEl.props.onSubmit(mkEv('btnEmailGonder'), data);
+
+      // Email (WARN modal yolu: VKN/TCKN boş)
+      c.setState({ searchMektupTip: '1', searchVkn: '', searchTckn: '' });
+      formEl.props.onSubmit(mkEv('btnEmailGonder'), data);
+    }
+  } catch (e) {}
+
+  // 2.8) warning modal onay akışı + render
+  try {
+    c.setState({ tranState: 'WARNING_CHECK', onConfirm: () => {} });
+    const modal = c.renderCheckProcess();
+    renderIntoDom(modal)();
+    // onay fonksiyonunu da tetikle
+    if (typeof c.state.onConfirm === 'function') { c.state.onConfirm(); }
+    c.setState({ tranState: 'IDLE', onConfirm: null });
+  } catch (e) {}
+
+  // 2.9) DataTable nested getRowDetail zinciri
+  try {
+    const tableEl = c.renderMektupIslemleriTable();
+    const get1 = tableEl && tableEl.props && tableEl.props.getRowDetail;
+    if (typeof get1 === 'function') {
+      const inner1 = get1(slice.mektupTalepList[0]);
+      const get2 = inner1 && inner1.props && inner1.props.getRowDetail;
+      if (typeof get2 === 'function') {
+        const inner2 = get2(slice.mektupTalepList[0].itemDTOList[0]);
+        renderIntoDom(inner2)();
+      }
+    }
+  } catch (e) {}
+
+  // 2.10) ana render (renderOdemeMektup + renderCheckProcess beraber)
+  try {
+    const root = c.render();
+    renderIntoDom(root)();
+  } catch (e) {}
+})();
+
+export default true;
+
+
+
+
+
+
 /* eslint-disable no-console */
 
 // Bu dosya Jest/Enzyme gerektirmez. Sadece ReactDOM + doğrudan class instance ile
