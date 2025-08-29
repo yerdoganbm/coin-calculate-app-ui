@@ -1,4 +1,398 @@
+// ... (package aynı)
 
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+// @ExtendWith(MockitoExtension.class) // JUnit5; JUnit4 ile bir arada kullanılmaz.
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.test.context.junit4.SpringRunner;
+import tr.gov.tcmb.ogmdfif.constant.*;
+import tr.gov.tcmb.ogmdfif.model.dto.EftSube;
+import tr.gov.tcmb.ogmdfif.model.dto.KararDTO;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.service.*;
+import tr.gov.tcmb.ogmdfif.util.Constants;
+import tr.gov.tcmb.ogmdfif.ws.client.MuhasebeClientService;
+import tr.gov.tcmb.ogmdfif.ws.client.SgkClientService;
+import tr.gov.tcmb.ogmdfif.ws.response.SgkResponse;
+import tr.gov.tcmb.ogmdfif.ws.response.SgkTahsilatKaydetResult;
+
+import java.math.BigDecimal;
+import java.util.*;
+
+import static java.util.Collections.singletonList;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.is;
+import static org.junit.Assert.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@RunWith(SpringRunner.class)
+@SpringBootTest
+@AutoConfigureMockMvc
+@ComponentScan("tr.gov.tcmb.ogmdfif")
+public class BorcIslemleriServiceImplTest {
+
+    @Autowired private BorcIslemleriServiceImpl service;
+
+    @MockBean protected SorgulananBorcBilgiService sorgulananBorcBilgiService;
+    @MockBean protected SorgulananBorcBilgiTahakkukService sorgulananBorcBilgiTahakkukService;
+    @MockBean protected ProvizyonTalepService provizyonTalepService;
+    @MockBean protected ProvizyonIslemleriService provizyonIslemleriService;
+    @MockBean protected BorcBilgiService borcBilgisiService;
+    @MockBean protected TahakkukIslemleriService tahakkukIslemleriService;
+    @MockBean protected BankaSubeService bankaSubeService;
+    @MockBean protected AnlikBorcService anlikBorcService;
+    @MockBean protected MailService mailService;
+    @MockBean protected MuhasebeClientService muhasebeClientService;
+    @MockBean protected GibBorcSorguService gibBorcSorguService;
+    @MockBean protected KararIslemleriService kararIslemleriService;
+    @MockBean protected SgkClientService sgkClientService;
+
+    private SorgulananBorcBilgi baseSbb;
+    private SorgulananBorcBilgiTahakkuk sbbt;
+    private Tahakkuk tahakkuk;
+    private ProvizyonTalep provTalep;
+    private Provizyon prov;
+    private EftSube eftSube;
+
+    @Before
+    public void setup() {
+        baseSbb = new SorgulananBorcBilgi();
+        baseSbb.setId(1L);
+        baseSbb.setTckn("11111111111");
+        baseSbb.setSgkIbanNo(Constants.SGK_IBAN);
+        baseSbb.setGibDosyaId("G-1");
+        baseSbb.setSorguDurum(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR.getKod());
+        baseSbb.setToplamGibBorcu(new BigDecimal("250.00"));
+        baseSbb.setToplamSgkBorcu(new BigDecimal("250.00"));
+        baseSbb.setKaydinIlkAtildigiTarih(new Date());
+
+        sbbt = new SorgulananBorcBilgiTahakkuk();
+        sbbt.setId(10L);
+        sbbt.setSorgulananBorcBilgiId(1L);
+        sbbt.setTahakkukId(100L);
+
+        tahakkuk = new Tahakkuk();
+        tahakkuk.setId(100L);
+        tahakkuk.setTur(KararTipiEnum.IHRACAT_TESVIK.getKod());
+        tahakkuk.setYil(2025);
+        tahakkuk.setBelgeNo(123);
+
+        TahakkukPaketiDosyasi paket = new TahakkukPaketiDosyasi();
+        paket.setTahakkukList(singletonList(tahakkuk));
+        tahakkuk.setTahakkukPaketiDosyasi(paket);
+
+        provTalep = new ProvizyonTalep();
+        provTalep.setId(500L);
+        provTalep.setTahakkukId(100L);
+        provTalep.setDurum(ProvizyonTalepDurum.OdemeyeHazir.getKod());
+
+        prov = new Provizyon();
+        prov.setId(700L);
+        prov.setOnaySicil("12345");
+        Ihracatci ihr = new Ihracatci();
+        ihr.setTckn("11111111111");
+        prov.setIhracatci(ihr);
+        prov.setSubeId(new BigDecimal("1"));
+        prov.setHakedisTutari(new BigDecimal("200.00"));
+        Karar karar = new Karar(); karar.setMahsupKarar(false);
+        prov.setKarar(karar);
+
+        eftSube = new EftSube(); eftSube.setBankaKod("001"); eftSube.setKod("999");
+    }
+
+    // --- Basit reset
+    @Test public void staticleriSifirla_ok() { service.staticleriSifirla(); }
+
+    // --- Dağıtım: provizyonlar boş (if (!provizyonList.isEmpty()) atlanır)
+    @Test
+    public void dagitim_provizyonBos() throws Exception {
+        SorgulananBorcBilgi s = cloneSbb(false);
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(any(), eq(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR), eq(0)))
+                .thenReturn(singletonList(s));
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(singletonList(sbbt));
+        when(tahakkukIslemleriService.getTahakkuk(100L)).thenReturn(tahakkuk);
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukListByTahakkukId("100")).thenReturn(singletonList(sbbt));
+        when(provizyonTalepService.getProvizyonTalepByTahakkukId(100L)).thenReturn(singletonList(provTalep));
+        when(provizyonIslemleriService.getProvizyonList(anyList(), any(), any())).thenReturn(Collections.emptyList());
+        when(sorgulananBorcBilgiService.kaydet(any())).thenAnswer(inv->inv.getArgument(0));
+
+        service.borclariHakediseGoreDagit(); // sadece çalışması önemli
+    }
+
+    // --- Dağıtım: toplam borç <= 0 kısa devre
+    @Test
+    public void dagitim_toplamBorcSifirKisaDevre() throws Exception {
+        SorgulananBorcBilgi s = cloneSbb(false);
+        s.setToplamGibBorcu(BigDecimal.ZERO);
+        s.setToplamSgkBorcu(BigDecimal.ZERO);
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(any(), any(), anyInt())).thenReturn(singletonList(s));
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(singletonList(sbbt));
+        when(provizyonTalepService.getProvizyonTalepByTahakkukId(100L)).thenReturn(singletonList(provTalep));
+        when(sorgulananBorcBilgiService.kaydet(any())).thenAnswer(inv->inv.getArgument(0));
+
+        service.borclariHakediseGoreDagit();
+        // Kısa devrede dağıtıldı işareti set edilir
+        assertTrue(s.getBorclarHakediseGoreDagitildi());
+    }
+
+    // --- Dağıtım: mahsup var, mahsup tutarı SGK’yı tamamen karşılıyor (else kolu)
+    @Test
+    public void dagitim_mahsupSgkTamKarsilar() throws Exception {
+        SorgulananBorcBilgi s = cloneSbb(false);
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(any(), any(), anyInt())).thenReturn(singletonList(s));
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(singletonList(sbbt));
+        when(tahakkukIslemleriService.getTahakkuk(100L)).thenReturn(tahakkuk);
+
+        KararDTO kd = new KararDTO(); kd.setMahsupKarar(true);
+        when(kararIslemleriService.getKararByKararNo(anyInt())).thenReturn(kd);
+
+        // Mahsup provizyonu SGK’yı tam karşılıyor (>=)
+        Provizyon pMahsup = provClone(new BigDecimal("300.00"), true);
+        Provizyon pNormal = provClone(new BigDecimal("50.00"), false);
+        when(provizyonIslemleriService.getProvizyonList(anyList(), any(), any()))
+                .thenReturn(Arrays.asList(pMahsup, pNormal));
+
+        when(bankaSubeService.getBankaSube(anyString(), anyString())).thenReturn(eftSube);
+        when(borcBilgisiService.save(any())).thenAnswer(inv->inv.getArgument(0));
+        when(sorgulananBorcBilgiService.kaydet(any())).thenAnswer(inv->inv.getArgument(0));
+
+        service.borclariHakediseGoreDagit();
+        assertTrue(s.getBorclarHakediseGoreDagitildi());
+    }
+
+    // --- filterOdenebilirDurumdakiTahakkukList: paket null + boş SBBT seti (log error dalı)
+    @Test
+    public void dagitim_filterOdenebilir_bosSet() throws Exception {
+        SorgulananBorcBilgi s = cloneSbb(false);
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(any(), any(), anyInt())).thenReturn(singletonList(s));
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(singletonList(sbbt));
+
+        Tahakkuk tNoPaket = new Tahakkuk(); tNoPaket.setId(100L); // paket null
+        when(tahakkukIslemleriService.getTahakkuk(100L)).thenReturn(tNoPaket);
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukListByTahakkukId("100")).thenReturn(Collections.emptyList());
+        when(provizyonTalepService.getProvizyonTalepByTahakkukId(100L))
+                .thenReturn(singletonList(provTalep));
+        when(provizyonIslemleriService.getProvizyonList(anyList(), any(), any()))
+                .thenReturn(singletonList(prov));
+        when(bankaSubeService.getBankaSube(anyString(), anyString())).thenReturn(eftSube);
+        when(borcBilgisiService.save(any())).thenReturn(new BorcBilgi());
+        when(sorgulananBorcBilgiService.kaydet(any())).thenAnswer(inv->inv.getArgument(0));
+
+        service.borclariHakediseGoreDagit();
+    }
+
+    // --- paketteIstemedigimizDurumlarVarMi: true/false
+    @Test
+    public void paketIstemeDurumlari_trueFalse() {
+        SorgulananBorcBilgi a = cloneSbb(false);
+        a.setSorguDurum(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod()); // 1 → true
+        assertTrue(BorcIslemleriServiceImpl.paketteIstemedigimizDurumlarVarMi(Arrays.asList(a)));
+
+        SorgulananBorcBilgi b = cloneSbb(false);
+        b.setSorguDurum(SorgulananBorcDurumEnum.KONTROL_TAMAM.getKod()); // 6 → false
+        assertFalse(BorcIslemleriServiceImpl.paketteIstemedigimizDurumlarVarMi(Arrays.asList(b)));
+    }
+
+    // --- Tahsilat kontrolü: GİB (filtreleme: odemeMuhasebeIstekId != null olanlar sayılmasın)
+    @Test
+    public void tahsilatKontrolu_gib_filtrelemeli() {
+        SorgulananBorcBilgi s = cloneSbb(false);
+        s.setSorguDurum(SorgulananBorcDurumEnum.TAHSILAT_BEKLIYOR.getKod());
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(any(), eq(SorgulananBorcDurumEnum.TAHSILAT_BEKLIYOR), eq(0)))
+                .thenReturn(singletonList(s));
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(singletonList(sbbt));
+        when(sorgulananBorcBilgiService.getPaketleIliskiliTumTahakkuklarinSbbleri(100L)).thenReturn(singletonList(s));
+        when(provizyonIslemleriService.getProvizyonList(anyList())).thenReturn(singletonList(prov));
+
+        BorcBilgi bbG = new BorcBilgi(); bbG.setBorcTipi(BorcTipEnum.GIB.getKod()); bbG.setTutar(new BigDecimal("40.00"));
+        BorcBilgi bbS = new BorcBilgi(); bbS.setBorcTipi(BorcTipEnum.SGK.getKod()); bbS.setTutar(new BigDecimal("60.00"));
+        BorcBilgi bbIgnore = new BorcBilgi(); bbIgnore.setBorcTipi(BorcTipEnum.GIB.getKod()); bbIgnore.setOdemeMuhasebeIstekId(1L);
+        when(borcBilgisiService.getBorcBilgiByProvizyonList(anyList()))
+                .thenReturn(Arrays.asList(bbG, bbS, bbIgnore));
+
+        when(anlikBorcService.getTahsilatBekleyenAnlikBorcList()).thenReturn(Collections.emptyList());
+        when(sorgulananBorcBilgiService.kaydet(any())).thenAnswer(inv->inv.getArgument(0));
+
+        service.tahsilatKontroluYap();
+        assertThat(s.getOdenecekGibBorcu(), is(new BigDecimal("40.00")));
+        assertThat(s.getOdenecekSgkBorcu(), is(new BigDecimal("60.00")));
+    }
+
+    // --- SGK tahsilat: SBB’den bağımsız anlık borçların gruplanması
+    @Test
+    public void sgkTahsilat_anlikBorc_gruplama() {
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiListByDurum(any(), eq(SorgulananBorcDurumEnum.KONTROL_TAMAM), eq(0)))
+                .thenReturn(Collections.emptyList()); // üst kısım atlanır
+
+        // Anlık borçlar: aynı ihracatçı için iki adet
+        Ihracatci i = new Ihracatci(); i.setTckn("11111111111");
+        AnlikBorc a1 = anlik(i, new BigDecimal("10.00"));
+        AnlikBorc a2 = anlik(i, new BigDecimal("15.00"));
+        when(anlikBorcService.getTahsilatBekleyenAnlikBorcList()).thenReturn(Arrays.asList(a1, a2));
+
+        // SBB araması: null dönerse bağımsız tahsilat yapılır
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiBySorguTarihi(any(), eq(i.getTckn()))).thenReturn(null);
+
+        SgkTahsilatKaydetResult data = new SgkTahsilatKaydetResult();
+        data.setTahsilatId(321L); data.setTahsilatTutari(new BigDecimal("25.00"));
+        SgkResponse<SgkTahsilatKaydetResult> resp = new SgkResponse<>(); resp.setReturnCode(201); resp.setData(data);
+        when(sgkClientService.tahsilatKaydet(anyLong(), any())).thenReturn(resp);
+
+        service.sgkTahsilatYap();
+
+        assertEquals("321", a1.getTahsilatId());
+        assertEquals("321", a2.getTahsilatId());
+        assertEquals(AnlikBorcDurumEnum.MUTABAKAT_BEKLIYOR.getKod(), a1.getIslemDurum());
+        assertNotNull(a1.getTahsilatTarihi());
+    }
+
+    // --- Uzun süren kayıtlarda: iş günü → mail
+    @Test
+    public void uzunSuren_isGunu_mail() throws Exception {
+        when(muhasebeClientService.getIsGunuMu(any())).thenReturn(true);
+        when(muhasebeClientService.getOncekiSonrakiIsGunu(any(), eq(-1))).thenReturn(new Date());
+        when(muhasebeClientService.getOncekiSonrakiIsGunu(any(), eq(-Constants.BORC_ISLEM_SURESI)))
+                .thenReturn(new Date(System.currentTimeMillis() - 3L*24*3600*1000));
+
+        SorgulananBorcBilgi wait = cloneSbb(false);
+        wait.setSorguDurum(SorgulananBorcDurumEnum.SORGU_SONUCU_BEKLIYOR.getKod());
+        when(sorgulananBorcBilgiService.getSorguTarihiAyniOlanSbbList(any())).thenReturn(singletonList(wait));
+        doNothing().when(mailService).sendMail(anyString(), anyList(), isNull(), anyString(), anyString());
+
+        service.uzunSurenKayitlarIcinMailAt();
+        verify(mailService, atLeastOnce()).sendMail(anyString(), anyList(), isNull(), contains("BORÇ SORGUSU"), anyString());
+    }
+
+    // --- Uzun süren: iş günü değil → erken çık
+    @Test
+    public void uzunSuren_isGunuDegil() throws Exception {
+        when(muhasebeClientService.getIsGunuMu(any())).thenReturn(false);
+        service.uzunSurenKayitlarIcinMailAt();
+        verifyNoInteractions(mailService);
+    }
+
+    // --- Yeni gün işlemleri: hacizli/iflaslı atla
+    @Test
+    public void yeniGun_hacizliAtla() throws Exception {
+        when(muhasebeClientService.getIsGunuMu(any())).thenReturn(true);
+        when(muhasebeClientService.getOncekiSonrakiIsGunu(any(), eq(-1))).thenReturn(new Date());
+
+        SorgulananBorcBilgi dunku = cloneSbb(false);
+        dunku.setSorguDurum(SorgulananBorcDurumEnum.SORGU_DOSYA_ID_BEKLIYOR.getKod());
+        when(sorgulananBorcBilgiService.getSorguTarihiAyniOlanSbbList(any(), anyList())).thenReturn(singletonList(dunku));
+
+        when(sorgulananBorcBilgiTahakkukService.getUniqueTahakkukList(anyList())).thenReturn(new HashSet<>(Arrays.asList(100L)));
+        TahakkukDetay detayHacizli = new TahakkukDetay();
+        Ihracatci ih = new Ihracatci(); ih.setTckn("11111111111"); ih.setHacizliYadaIflasli(true);
+        detayHacizli.setIhracatci(ih);
+        when(tahakkukIslemleriService.getTahakkukDetayList(100L)).thenReturn(singletonList(detayHacizli));
+
+        service.sorgulananBorcYeniGunleAlakaliIslemleriYap();
+        verify(sorgulananBorcBilgiService, never()).kaydet(any());
+    }
+
+    // --- Yeni gün: sadece bağ kır (SBB silinmesin)
+    @Test
+    public void yeniGun_sadeceBagKir() throws Exception {
+        when(muhasebeClientService.getIsGunuMu(any())).thenReturn(true);
+        when(muhasebeClientService.getOncekiSonrakiIsGunu(any(), eq(-1))).thenReturn(new Date());
+
+        SorgulananBorcBilgi eski = cloneSbb(false);
+        when(sorgulananBorcBilgiService.getSorguTarihiAyniOlanSbbList(any(), anyList()))
+                .thenReturn(singletonList(eski));
+        when(sorgulananBorcBilgiTahakkukService.getUniqueTahakkukList(anyList()))
+                .thenReturn(new HashSet<>(Arrays.asList(100L)));
+
+        // Eski SBB birden fazla bağa sahip olsun → sadece isteneni silsin, SBB silinmesin
+        SorgulananBorcBilgiTahakkuk b1 = new SorgulananBorcBilgiTahakkuk(); b1.setSorgulananBorcBilgiId(1L); b1.setTahakkukId(100L);
+        SorgulananBorcBilgiTahakkuk b2 = new SorgulananBorcBilgiTahakkuk(); b2.setSorgulananBorcBilgiId(1L); b2.setTahakkukId(101L);
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(Arrays.asList(b1, b2));
+
+        TahakkukDetay d = new TahakkukDetay(); Ihracatci i = new Ihracatci(); i.setTckn("11111111111"); d.setIhracatci(i);
+        when(tahakkukIslemleriService.getTahakkukDetayList(100L)).thenReturn(singletonList(d));
+
+        // Bugünkü SBB yok → yeni oluşturulsun
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgi(any(), anyString())).thenReturn(null);
+        when(sorgulananBorcBilgiService.kaydet(any())).thenAnswer(inv->{ SorgulananBorcBilgi y=inv.getArgument(0); y.setId(222L); return y; });
+        when(sorgulananBorcBilgiTahakkukService.get(100L, 222L)).thenReturn(null);
+
+        service.sorgulananBorcYeniGunleAlakaliIslemleriYap();
+
+        verify(sorgulananBorcBilgiService, never()).sil(any());      // SBB silinmedi
+        verify(sorgulananBorcBilgiTahakkukService, atLeastOnce()).sil(anyLong()); // sadece bağ silindi
+    }
+
+    // --- Tahakkuk metinleri + ödenebilir kontrol (sadece 6 ve 10 + OdemeyeHazir)
+    @Test
+    public void odenebilirTahakkukBilgisi_trueYolu() {
+        when(sorgulananBorcBilgiTahakkukService.getSorgulananBorcBilgiTahakkukList(1L)).thenReturn(singletonList(sbbt));
+        when(tahakkukIslemleriService.getTahakkuk(100L)).thenReturn(tahakkuk);
+
+        SorgulananBorcBilgi s6 = cloneSbb(false); s6.setSorguDurum("6");
+        SorgulananBorcBilgi s10 = cloneSbb(false); s10.setSorguDurum("10");
+        when(sorgulananBorcBilgiService.getSorgulananBorcBilgiByTahakkukId(100L)).thenReturn(Arrays.asList(s6, s10));
+
+        ProvizyonTalep pt = new ProvizyonTalep(); pt.setDurum(ProvizyonTalepDurum.OdemeyeHazir.getKod());
+        when(provizyonTalepService.getProvizyonTalepByTahakkukId(100L)).thenReturn(singletonList(pt));
+
+        String s = service.getOdenebilirTahakkukBilgileri(baseSbb);
+        assertThat(s, containsString("belge numaralı"));
+    }
+
+    // --- Yardımcılar
+    private SorgulananBorcBilgi cloneSbb(boolean dagitildi) {
+        SorgulananBorcBilgi x = new SorgulananBorcBilgi();
+        x.setId(1L);
+        x.setTckn("11111111111");
+        x.setSgkIbanNo(Constants.SGK_IBAN);
+        x.setGibDosyaId("G-1");
+        x.setSorguDurum(SorgulananBorcDurumEnum.BORC_DAGITIMI_BEKLIYOR.getKod());
+        x.setToplamGibBorcu(new BigDecimal("250.00"));
+        x.setToplamSgkBorcu(new BigDecimal("250.00"));
+        x.setBorclarHakediseGoreDagitildi(dagitildi);
+        x.setKaydinIlkAtildigiTarih(new Date());
+        return x;
+    }
+
+    private Provizyon provClone(BigDecimal tutar, boolean mahsup) {
+        Provizyon p = new Provizyon();
+        p.setId(new Random().nextLong());
+        p.setOnaySicil("12345");
+        p.setSubeId(new BigDecimal("1"));
+        p.setHakedisTutari(tutar);
+        Ihracatci i = new Ihracatci(); i.setTckn("11111111111"); p.setIhracatci(i);
+        Karar k = new Karar(); k.setMahsupKarar(mahsup); p.setKarar(k);
+        return p;
+    }
+
+    private AnlikBorc anlik(Ihracatci i, BigDecimal tutar) {
+        AnlikBorc a = new AnlikBorc();
+        a.setIhracatci(i);
+        a.setBorcTip(BorcTipEnum.SGK.getKod());
+        a.setOdenecekTutar(tutar);
+        a.setIslemDurum(AnlikBorcDurumEnum.TAHSILAT_BEKLIYOR.getKod());
+        a.setSorguId(1L);
+        return a;
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+-------
 @ExtendWith(MockitoExtension.class)
 @RunWith(SpringRunner.class)
 @SpringBootTest
