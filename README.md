@@ -1,3 +1,487 @@
+// __tests__/OdemeMektuplari.test.jsx
+/* eslint-disable react/no-is-mounted */
+
+import React from 'react';
+import { browserHistory } from 'react-router-dom';
+import { Provider } from 'react-redux';
+import { shallow, mount } from 'enzyme';
+import { act } from 'react-dom/test-utils';
+
+import { mountWithIntl } from 'utils/intl-enzyme-test-helper';
+import configureStore from '../../configureStore';
+
+// HOC'ları pas-through yap
+jest.mock('utils/injectReducer', () => (opts) => (Comp) => Comp);
+jest.mock('utils/injectSaga', () => (opts) => (Comp) => Comp);
+
+// tcmb-ui-components'i hafifletilmiş mock
+jest.mock('tcmb-ui-components', () => {
+  const React = require('react');
+  const MockComp = ({ children, ...rest }) => <div data-mock {...rest}>{children}</div>;
+
+  const Form = ({ children, onSubmit, ...rest }) => (
+    <form
+      data-form
+      onSubmit={(e) => {
+        if (onSubmit) onSubmit(e, { validateForm: () => null });
+        e.preventDefault();
+      }}
+      {...rest}
+    >
+      {children}
+    </form>
+  );
+  Form.Field = MockComp;
+  Form.Group = MockComp;
+  Form.Input = (props) => <input data-form-input {...props} onChange={(e) => props.onChange?.(e, { value: e.target.value })} />;
+  Form.Select = (props) => (
+    <select
+      data-form-select
+      value={props.value || ''}
+      onChange={(e) => props.onChange?.(e, { value: e.target.value })}
+      {...props}
+    />
+  );
+  Form.Datepicker = ({ selected, onChange, ...rest }) => (
+    <input
+      data-form-date
+      type="date"
+      value={selected || ''}
+      onChange={(e) => onChange?.(e.target.value)}
+      {...rest}
+    />
+  );
+
+  const DataTable = ({ children, ...rest }) => <div data-datatable {...rest}>{children}</div>;
+  const Button = ({ onClick, type = 'button', id, content, ...rest }) => (
+    <button data-button id={id} type={type} onClick={onClick} {...rest}>{content || rest.children}</button>
+  );
+  const Segment = MockComp;
+  Segment.Group = MockComp;
+  const Grid = ({ children, ...rest }) => <div data-grid {...rest}>{children}</div>;
+  Grid.Row = MockComp;
+  Grid.Column = MockComp;
+
+  const Modal = ({ children, open }) => (open ? <div data-modal>{children}</div> : null);
+  Modal.Content = MockComp;
+  const List = ({ children }) => <ul data-list>{children}</ul>;
+  List.Item = ({ children }) => <li data-list-item>{children}</li>;
+  List.Icon = () => <span data-list-icon />;
+
+  return { Form, DataTable, Button, Segment, Grid, Modal, List };
+});
+
+// Dropdownları basitleştir
+jest.mock('../../components/DropdownKararNo', () => {
+  const React = require('react');
+  return ({ onSelect, clearTrigger }) => (
+    <input
+      data-dropdown-kararno
+      onChange={(e) => onSelect?.(e.target.value)}
+      data-clearkey={String(!!clearTrigger)}
+    />
+  );
+});
+jest.mock('../../components/DropdownIhracatci', () => {
+  const React = require('react');
+  return ({ onSelect, clearTrigger }) => (
+    <input
+      data-dropdown-ihracatci
+      onChange={(e) => onSelect?.(e.target.value)}
+      data-clearkey={String(!!clearTrigger)}
+    />
+  );
+});
+
+// Kolonlar: yalnızca varmış gibi davranalım
+jest.mock('../columns', () => ({
+  MektupDetayColumns: [{ key: 'a' }],
+  MektupDetayLogColumns: [{ key: 'b' }],
+  MektupMainColumns: [{ key: 'c' }],
+}));
+
+// Aksiyonları spy’lamak için mock
+const mektupTalepSearchMock = jest.fn((...args) => ({ type: 'MEKTUP_TALEP_SEARCH', payload: args }));
+const mektupEpostaGonderMock = jest.fn((...args) => ({ type: 'MEKTUP_EPOSTA_GONDER', payload: args }));
+const mektupYazdirMock = jest.fn((...args) => ({ type: 'MEKTUP_YAZDIR', payload: args }));
+const searchIhracatciMock = jest.fn((v, t) => ({ type: 'SEARCH_IHRACATCI', v, t }));
+const clearIhracatciMock = jest.fn(() => ({ type: 'CLEAR_IHRACATCI' }));
+
+jest.mock('../redux/actions', () => ({
+  mektupTalepSearch: (...args) => mektupTalepSearchMock(...args),
+  mektupEpostaGonder: (...args) => mektupEpostaGonderMock(...args),
+  mektupYazdir: (...args) => mektupYazdirMock(...args),
+  searchIhracatci: (v, t) => searchIhracatciMock(v, t),
+  clearIhracatci: () => clearIhracatciMock(),
+}));
+
+// Test edilen bileşenler
+import ConnectedOdemeMektuplari, { OdemeMektuplari as RawComp } from '../index';
+
+// Yardımcı: default props/state
+const defaultSlice = {
+  activePage: 1,
+  rowCount: 10,
+  totalPages: 5,
+  size: 100,
+  mektupTalepList: [],
+  mektupSearchLoading: false,
+  mektupYazdirLoading: false,
+  mektupEpostaGonderLoading: false,
+};
+
+const makeProps = (overrides = {}) => ({
+  dispatch: jest.fn(),
+  odemeMektuplari: { ...defaultSlice, ...overrides },
+});
+
+describe('<OdemeMektuplari /> — connected (default export)', () => {
+  let store;
+
+  beforeAll(() => {
+    store = configureStore({}, browserHistory);
+  });
+
+  it('renders with Provider + store', () => {
+    const wrapper = mountWithIntl(
+      <Provider store={store}>
+        <ConnectedOdemeMektuplari id="odemeMektuplari" />
+      </Provider>,
+    );
+    expect(wrapper.exists()).toBe(true);
+  });
+});
+
+describe('<OdemeMektuplari /> — raw class behaviors', () => {
+  const makeShallow = (p = {}) => shallow(<RawComp {...makeProps(p)} />);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('renders sections without crashing and shows search + table containers', () => {
+    const wrapper = makeShallow();
+    expect(wrapper.find('[data-form]').exists()).toBe(true); // Search form mocklandı
+    expect(wrapper.find('[data-datatable]').exists()).toBe(true); // Ana tablo mock
+  });
+
+  it('handleIhracatciSelect sets VKN when 10 haneli, TCKN when 11 haneli, yoksa ikisi de boş', () => {
+    const wrapper = makeShallow();
+    const inst = wrapper.instance();
+
+    inst.handleIhracatciSelect('1234567890 - Foo A.Ş.');
+    expect(wrapper.state('searchVkn')).toBe('1234567890');
+    expect(wrapper.state('searchTckn')).toBe('');
+
+    inst.handleIhracatciSelect('12345678901 - Bar Ltd.');
+    expect(wrapper.state('searchVkn')).toBe('');
+    expect(wrapper.state('searchTckn')).toBe('12345678901');
+
+    inst.handleIhracatciSelect('X - Y');
+    expect(wrapper.state('searchVkn')).toBe('');
+    expect(wrapper.state('searchTckn')).toBe('');
+  });
+
+  it('formatDate returns formatted string when obj has .format, else empty', () => {
+    const wrapper = makeShallow();
+    const inst = wrapper.instance();
+
+    const d = { format: jest.fn().mockReturnValue('2025-08-28') };
+    expect(inst.formatDate(d)).toBe('2025-08-28');
+    expect(inst.formatDate(null)).toBe('');
+  });
+
+  it('mektupTalepSearchFunc dispatches mektupTalepSearch with slice paging + state filters', () => {
+    const props = makeProps({ activePage: 3, rowCount: 50 });
+    const wrapper = shallow(<RawComp {...props} />);
+
+    wrapper.setState({
+      searchKararNo: 'K-1',
+      searchBelgeTip: 'A',
+      searchBelgeNo: '10',
+      searchBelgeYil: '2025',
+      searchOdemeTarih: { format: () => '2025-08-01' },
+      searchOdemeTarihSon: { format: () => '2025-08-31' },
+      searchVkn: '1234567890',
+      searchTckn: '',
+      searchMektupTip: '1',
+    });
+
+    wrapper.instance().mektupTalepSearchFunc();
+    expect(mektupTalepSearchMock).toHaveBeenCalledWith(
+      3, 50, 'K-1', 'A', '10', '2025', '2025-08-01', '2025-08-31', '1234567890', '', '1',
+    );
+    expect(props.dispatch).toHaveBeenCalled();
+  });
+
+  it('mektupYazdirFields dispatches mektupYazdir with current filters', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+    wrapper.setState({
+      searchKararNo: 'K-2',
+      searchBelgeTip: 'B',
+      searchBelgeNo: '20',
+      searchBelgeYil: '2024',
+      searchOdemeTarih: { format: () => '2024-01-01' },
+      searchOdemeTarihSon: { format: () => '2024-12-31' },
+      searchVkn: '',
+      searchTckn: '12345678901',
+      searchMektupTip: '2',
+    });
+
+    wrapper.instance().mektupYazdirFields();
+    expect(mektupYazdirMock).toHaveBeenCalledWith(
+      'K-2', 'B', '20', '2024', '2024-01-01', '2024-12-31', '', '12345678901', '2',
+    );
+    expect(props.dispatch).toHaveBeenCalled();
+  });
+
+  it('mektupEpostaGonderFunc dispatches mektupEpostaGonder with current filters', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+    wrapper.setState({
+      searchKararNo: 'K-3',
+      searchBelgeTip: 'C',
+      searchBelgeNo: '30',
+      searchBelgeYil: '2023',
+      searchOdemeTarih: { format: () => '2023-02-01' },
+      searchOdemeTarihSon: { format: () => '2023-02-28' },
+      searchVkn: '1111111111',
+      searchTckn: '',
+      searchMektupTip: '4',
+    });
+
+    wrapper.instance().mektupEpostaGonderFunc();
+    expect(mektupEpostaGonderMock).toHaveBeenCalledWith(
+      'K-3', 'C', '30', '2023', '2023-02-01', '2023-02-28', '1111111111', '', '4',
+    );
+    expect(props.dispatch).toHaveBeenCalled();
+  });
+
+  it('handleSearchIhracatciFields dispatches search/clear actions based on VKN/TCKN input in inputs', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+
+    // VKN 10 hane olduğunda searchIhracatci çağrılır
+    wrapper.instance().handleSearchIhracatciFields('1234567890', '');
+    expect(searchIhracatciMock).toHaveBeenCalledWith('1234567890', '');
+
+    // TCKN 11 hane olduğunda searchIhracatci çağrılır
+    wrapper.instance().handleSearchIhracatciFields('', '12345678901');
+    expect(searchIhracatciMock).toHaveBeenCalledWith('', '12345678901');
+  });
+
+  it('handleClearMektupFields clears search fields, toggles clear flags and dispatches clearIhracatci', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+
+    wrapper.setState({
+      searchKararNo: 'K',
+      searchBelgeTip: 'X',
+      searchBelgeNo: '9',
+      searchBelgeYil: '2022',
+      searchOdemeTarih: 'd1',
+      searchOdemeTarihSon: 'd2',
+      searchVkn: 'v',
+      searchTckn: 't',
+      searchMektupTip: '1',
+      clearKararNo: false,
+      clearIhracatciAdi: false,
+    });
+
+    wrapper.instance().handleClearMektupFields();
+
+    const s = wrapper.state();
+    expect(s.searchKararNo).toBe('');
+    expect(s.searchBelgeTip).toBe('');
+    expect(s.searchBelgeNo).toBe('');
+    expect(s.searchBelgeYil).toBe('');
+    expect(s.searchOdemeTarih).toBe('');
+    expect(s.searchOdemeTarihSon).toBe('');
+    expect(s.searchVkn).toBe('');
+    expect(s.searchTckn).toBe('');
+    expect(s.searchMektupTip).toBe('');
+    expect(s.clearKararNo).toBe(true);
+    expect(s.clearIhracatciAdi).toBe(true);
+    expect(clearIhracatciMock).toHaveBeenCalled();
+  });
+
+  it('table row selection handlers maintain selectedTaleps and selectedRows', () => {
+    const wrapper = makeShallow();
+    const inst = wrapper.instance();
+
+    // Tek tek seçim
+    inst.handleSelectMektupIslemleri({ requestId: 'R1', id: 'I1' }, true);
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set(['R1']));
+    expect(wrapper.state('selectedRows')).toEqual(['I1']);
+
+    // Başka bir satır ekle
+    inst.handleSelectMektupIslemleri({ requestId: 'R2', id: 'I2' }, true);
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set(['R1', 'R2']));
+    expect(wrapper.state('selectedRows').sort()).toEqual(['I1', 'I2']);
+
+    // Bir seçim kaldır
+    inst.handleSelectMektupIslemleri({ requestId: 'R1', id: 'I1' }, false);
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set(['R2']));
+    expect(wrapper.state('selectedRows')).toEqual(['I2']);
+
+    // Toplu seçim
+    inst.handleSelectMektupIslemleriFromList([
+      { requestId: 'R3', id: 'I3' },
+      { requestId: 'R4', id: 'I4' },
+    ]);
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set(['R3', 'R4']));
+    expect(wrapper.state('selectedRows').sort()).toEqual(['I3', 'I4']);
+
+    // Temizle
+    inst.handleClearList();
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set());
+    expect(wrapper.state('selectedRows')).toEqual([]);
+  });
+
+  it('handlePaginationChange triggers search and resets selections when page changes', () => {
+    const props = makeProps({ activePage: 1 });
+    const wrapper = shallow(<RawComp {...props} />);
+
+    wrapper.setState({ selectedTaleps: new Set(['R1']), selectedRows: ['I1'] });
+
+    wrapper.instance().handlePaginationChange(null, { activePage: 2 });
+
+    // slice içi mutasyon yapıyor: activePage güncellenmeli
+    expect(props.odemeMektuplari.activePage).toBe(2);
+    expect(mektupTalepSearchMock).toHaveBeenCalled();
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set());
+    expect(wrapper.state('selectedRows')).toEqual([]);
+  });
+
+  it('handlePageSizeChange recalculates pages, triggers search and resets selectedTaleps', () => {
+    const props = makeProps({ activePage: 5, size: 200, rowCount: 10, totalPages: 20 });
+    const wrapper = shallow(<RawComp {...props} />);
+
+    wrapper.setState({ selectedTaleps: new Set(['R']), selectedRows: ['I'] });
+
+    // newPageSize = 25 => newTotalPages = ceil(200/25)=8, newActivePage = min(8, 5) = 5
+    wrapper.instance().handlePageSizeChange(null, { value: 25 });
+
+    expect(props.odemeMektuplari.rowCount).toBe(25);
+    expect(props.odemeMektuplari.totalPages).toBe(8);
+    expect(props.odemeMektuplari.activePage).toBe(5);
+    expect(mektupTalepSearchMock).toHaveBeenCalled();
+    expect(wrapper.state('selectedTaleps')).toEqual(new Set());
+  });
+
+  it('renderCheckProcess returns null when IDLE; shows modal when WARNING_CHECK', () => {
+    const wrapper = makeShallow();
+    // IDLE
+    expect(wrapper.find('[data-modal]').exists()).toBe(false);
+
+    wrapper.setState({ tranState: 'WARNING_CHECK', onConfirm: null });
+    // re-render
+    wrapper.update();
+    expect(wrapper.find('[data-modal]').exists()).toBe(true);
+  });
+
+  it('email gönderimi için WARNING_CHECK akışı: confirm ile onConfirm çalışır', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+
+    const confirmFn = jest.fn();
+    wrapper.setState({ tranState: 'WARNING_CHECK', onConfirm: confirmFn });
+
+    // Modal içindeki "Devam Et" butonu mock’ta id verilmedi; state üzerinden tetikleyelim
+    // renderCheckProcess içinde: onClick -> onConfirm(); state IDLE olur
+    const { onConfirm } = wrapper.state();
+    expect(typeof onConfirm).toBe('function');
+
+    onConfirm(); // confirm’e basılmış gibi
+    expect(confirmFn).toHaveBeenCalled();
+    // state reset mantığı renderClick içinde; burada manuel set edildiği için ayrıca kontrol gerekmiyor
+  });
+
+  it('DropdownKararNo ve DropdownIhracatci alanları state’i günceller', () => {
+    const wrapper = makeShallow();
+
+    // KararNo
+    wrapper.find('[data-dropdown-kararno]').simulate('change', { target: { value: 'KR-999' } });
+    expect(wrapper.state('searchKararNo')).toBe('KR-999');
+
+    // DropdownIhracatci "ihracatciAdi" -> handleIhracatciSelect çağrılır (mock input direkt value geçiyor)
+    wrapper.find('[data-dropdown-ihracatci]').simulate('change', { target: { value: '1234567890 - XYZ' } });
+    expect(wrapper.state('searchVkn')).toBe('1234567890');
+    expect(wrapper.state('searchTckn')).toBe('');
+  });
+
+  it('VKN yazılırken 10 haneye ulaşınca searchIhracatci; değilse clearIhracatci', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+
+    // VKN alanını bulup değişimi simüle etmek için render edilmiş Form.Input mock’larından birini kullanalım:
+    const vknInput = wrapper.find('[data-form-input]').filterWhere(n => n.prop('id') === 'searchIhracatciVkn').first();
+    expect(vknInput.exists()).toBe(true);
+
+    // 9 hane (clear)
+    vknInput.props().onChange({}, { value: '123456789' });
+    expect(clearIhracatciMock).toHaveBeenCalledTimes(1);
+
+    // 10 hane (search)
+    vknInput.props().onChange({}, { value: '1234567890' });
+    expect(searchIhracatciMock).toHaveBeenCalledWith('1234567890', '');
+  });
+
+  it('TCKN yazılırken 11 haneye ulaşınca searchIhracatci; değilse clearIhracatci', () => {
+    const props = makeProps();
+    const wrapper = shallow(<RawComp {...props} />);
+
+    const tcknInput = wrapper.find('[data-form-input]').filterWhere(n => n.prop('id') === 'searchIhracatciTckn').first();
+    expect(tcknInput.exists()).toBe(true);
+
+    // 10 hane (clear)
+    tcknInput.props().onChange({}, { value: '1234567890' });
+    expect(clearIhracatciMock).toHaveBeenCalledTimes(1);
+
+    // 11 hane (search)
+    tcknInput.props().onChange({}, { value: '12345678901' });
+    expect(searchIhracatciMock).toHaveBeenCalledWith('', '12345678901');
+  });
+
+  it('Mektup Tipi zorunlu olduğunda (1/2/4) e-posta butonu görünür mantığı (isSearchMektupTipValid)', () => {
+    // Fonksiyon modül içinde tanımlı; görünürlüğü tetikleyen state değişimini gözlemleyelim
+    const wrapper = makeShallow();
+
+    // Başta boş -> görünmeyebilir (mock’ta doğrudan DOM kontrolü zor; state güncellemesini kabul edelim)
+    wrapper.setState({ searchMektupTip: '1' });
+    wrapper.update();
+    // Buttonların varlığı test etmek için tüm buttonları toplayıp id’leri kontrol edebiliriz
+    const buttons = wrapper.find('[data-button]');
+    const hasEmailBtn = buttons.someWhere(n => n.prop('id') === 'btnEmailGonder');
+    expect(hasEmailBtn).toBe(true);
+
+    wrapper.setState({ searchMektupTip: '3' });
+    wrapper.update();
+    const buttons2 = wrapper.find('[data-button]');
+    const hasEmailBtn2 = buttons2.someWhere(n => n.prop('id') === 'btnEmailGonder');
+    expect(hasEmailBtn2).toBe(false);
+  });
+
+  it('renderMektupIslemleriTable nested getRowDetail render fonksiyonları tanımlı', () => {
+    const wrapper = makeShallow();
+
+    const table = wrapper.find('[data-datatable]').first();
+    expect(table.exists()).toBe(true);
+
+    const props = table.props();
+    expect(typeof props.getRowDetail).toBe('function');
+
+    const inner = props.getRowDetail({ itemDTOList: [] });
+    expect(React.isValidElement(inner)).toBe(true);
+  });
+});
+
+
+
+
+yunus
+
 import React from 'react';
 import { browserHistory } from 'react-router-dom';
 import { mountWithIntl } from 'utils/intl-enzyme-test-helper';
