@@ -1,3 +1,31 @@
+
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
+
+// ...
+
+// searchTalepAraFirstTarih / searchTalepAraLastTarih kontrolleri
+boolean onlyOneProvided =
+        (searchTalepAraFirstTarih != null && searchTalepAraLastTarih == null) ||
+        (searchTalepAraFirstTarih == null && searchTalepAraLastTarih != null);
+
+if (onlyOneProvided) {
+    throw new GecersizVeriException("Talep arama tarih aralığı için her iki tarih de birlikte girilmelidir.");
+}
+
+if (searchTalepAraFirstTarih != null && searchTalepAraLastTarih != null) {
+    // Sıra kontrolü
+    if (searchTalepAraLastTarih.isBefore(searchTalepAraFirstTarih)) {
+        throw new GecersizVeriException("Talep arama son tarih, ilk tarihten önce olamaz.");
+    }
+    // Maksimum aralık: 15 gün (dahil). İki tarih aynı gün olabilir (0 gün).
+    long days = ChronoUnit.DAYS.between(searchTalepAraFirstTarih, searchTalepAraLastTarih);
+    if (days > 15) {
+        throw new GecersizVeriException("Talep arama tarih aralığı en fazla 15 gün olabilir.");
+    }
+}
+
+
 // LetterRequestTransactionsServiceImpl.java
 @Service
 @RequiredArgsConstructor
