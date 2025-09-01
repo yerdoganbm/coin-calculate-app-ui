@@ -1,3 +1,245 @@
+// GenericSpecification.java
+package tr.gov.tcmb.ogmdfif.repository.spec;
+
+import org.springframework.data.jpa.domain.Specification;
+
+import jakarta.persistence.criteria.*;
+import java.time.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@SuppressWarnings("serial")
+public class GenericSpecification<T> implements Specification<T> {
+
+    private final SearchCriteria criteria;
+    private final ZoneId zoneId; // projenin varsayılan TZ'si
+
+    public GenericSpecification(SearchCriteria criteria) {
+        this(criteria, ZoneId.of("Europe/Istanbul"));
+    }
+
+    public GenericSpecification(SearchCriteria criteria, ZoneId zoneId) {
+        this.criteria = criteria;
+        this.zoneId = zoneId == null ? ZoneId.systemDefault() : zoneId;
+    }
+
+    @Override
+    public Predicate toPredicate(Root<T> root, CriteriaQuery<?> query, CriteriaBuilder builder) {
+
+        List<Predicate> predicates = new ArrayList<>();
+
+        // ---- LIKE (MATCH_START) örneği - case-insensitive ----
+        if (criteria.getOperation() == SearchOperationEnum.MATCH_START) {
+            Expression<String> path = builder.lower(root.get(criteria.getKey()));
+            predicates.add(builder.like(path, criteria.getValue().toString().toLowerCase() + "%"));
+        }
+        // ---- EQUAL ----
+        else if (criteria.getOperation() == SearchOperationEnum.EQUAL) {
+            predicates.add(builder.equal(root.get(criteria.getKey()), criteria.getValue()));
+        }
+        // ---- NOT EQUAL ----
+        else if (criteria.getOperation() == SearchOperationEnum.NOT_EQUAL) {
+            predicates.add(builder.notEqual(root.get(criteria.getKey()), criteria.getValue()));
+        }
+        // ---- GREATER_THAN ----
+        else if (criteria.getOperation() == SearchOperationEnum.GREATER_THAN) {
+            predicates.add(builder.greaterThan(root.get(criteria.getKey()), (Comparable) criteria.getValue()));
+        }
+        // ---- LESS_THAN ----
+        else if (criteria.getOperation() == SearchOperationEnum.LESS_THAN) {
+            predicates.add(builder.lessThan(root.get(criteria.getKey()), (Comparable) criteria.getValue()));
+        }
+        // ---- IN ----
+        else if (criteria.getOperation() == SearchOperationEnum.IN) {
+            Collection<?> vals = coerceToCollection(criteria.getValue());
+            if (vals != null && !vals.isEmpty()) {
+                predicates.add(root.get(criteria.getKey()).in(vals));
+            }
+        }
+        // ---- NOT_IN ----
+        else if (criteria.getOperation() == SearchOperationEnum.NOT_IN) {
+            Collection<?> vals = coerceToCollection(criteria.getValue());
+            if (vals != null && !vals.isEmpty()) {
+                predicates.add(builder.not(root.get(criteria.getKey()).in(vals)));
+            }
+        }
+        // ---- IS_NULL ----
+        else if (criteria.getOperation() == SearchOperationEnum.IS_NULL) {
+            predicates.add(builder.isNull(root.get(criteria.getKey())));
+        }
+        // ---- IS_NOT_NULL ----
+        else if (criteria.getOperation() == SearchOperationEnum.IS_NOT_NULL) {
+            predicates.add(builder.isNotNull(root.get(criteria.getKey())));
+        }
+        // ---- BETWEEN_INCLUSIVE (tarih/datetime için güvenli) ----
+        else if (criteria.getOperation() == SearchOperationEnum.BETWEEN_INCLUSIVE) {
+            List<?> values = values2(criteria.getValue());
+            if (values != null) {
+                Object lower = values.get(0);
+                Object upper = values.get(1);
+
+                Path<?> path = root.get(criteria.getKey());
+                Class<?> attrType = path.getJavaType();
+
+                // LocalDate alanı
+                if (attrType.equals(LocalDate.class)) {
+                    LocalDate l = toLocalDate(lower);
+                    LocalDate u = toLocalDate(upper);
+                    if (l != null && u != null) {
+                        predicates.add(builder.between(root.get(criteria.getKey()), l, u));
+                    }
+                }
+                // LocalDateTime alanı
+                else if (attrType.equals(LocalDateTime.class)) {
+                    LocalDateTime l = toLocalDateTime(lower, true);
+                    LocalDateTime u = toLocalDateTime(upper, false); // gün sonu dahil
+                    if (l != null && u != null) {
+                        predicates.add(builder.between(root.get(criteria.getKey()), l, u));
+                    }
+                }
+                // OffsetDateTime alanı
+                else if (attrType.equals(OffsetDateTime.class)) {
+                    OffsetDateTime l = toOffsetDateTime(lower, true);
+                    OffsetDateTime u = toOffsetDateTime(upper, false); // gün sonu dahil
+                    if (l != null && u != null) {
+                        predicates.add(builder.between(root.get(criteria.getKey()), l, u));
+                    }
+                }
+                // java.util.Date / Timestamp
+                else if (Date.class.isAssignableFrom(attrType)) {
+                    Date l = toDate(lower, true);
+                    Date u = toDate(upper, false); // gün sonu dahil
+                    if (l != null && u != null) {
+                        predicates.add(builder.between(root.get(criteria.getKey()), l, u));
+                    }
+                }
+                // başka tiplere String fallback YOK (tip hatası olmasın)
+            }
+        }
+
+        // Tüm eklenen predicate'ler AND ile bağlanır.
+        return builder.and(predicates.toArray(new Predicate[0]));
+    }
+
+    // ----------------- Helpers -----------------
+
+    private Collection<?> coerceToCollection(Object value) {
+        if (value == null) return Collections.emptyList();
+        if (value instanceof Collection<?>) return (Collection<?>) value;
+        if (value.getClass().isArray()) {
+            int len = java.lang.reflect.Array.getLength(value);
+            List<Object> list = new ArrayList<>(len);
+            for (int i = 0; i < len; i++) list.add(java.lang.reflect.Array.get(value, i));
+            return list;
+        }
+        return Collections.singletonList(value);
+    }
+
+    private List<?> values2(Object val) {
+        if (val == null) return null;
+        if (val instanceof List<?> l && l.size() >= 2) return Arrays.asList(l.get(0), l.get(1));
+        if (val instanceof Object[] arr && arr.length >= 2) return Arrays.asList(arr[0], arr[1]);
+        return null;
+    }
+
+    private LocalDate toLocalDate(Object o) {
+        if (o == null) return null;
+        if (o instanceof LocalDate d) return d;
+        if (o instanceof LocalDateTime ldt) return ldt.toLocalDate();
+        if (o instanceof OffsetDateTime odt) return odt.toLocalDate();
+        if (o instanceof Date d) return Instant.ofEpochMilli(d.getTime()).atZone(zoneId).toLocalDate();
+        if (o instanceof CharSequence cs) return LocalDate.parse(cs);
+        return null;
+    }
+
+    private LocalDateTime toLocalDateTime(Object o, boolean startOfDay) {
+        if (o == null) return null;
+        if (o instanceof LocalDateTime ldt) return startOrEnd(ldt, startOfDay);
+        if (o instanceof LocalDate d) return startOrEnd(d.atStartOfDay(), startOfDay);
+        if (o instanceof OffsetDateTime odt) return startOrEnd(odt.toLocalDateTime(), startOfDay);
+        if (o instanceof Date d) {
+            LocalDateTime ldt = Instant.ofEpochMilli(d.getTime()).atZone(zoneId).toLocalDateTime();
+            return startOrEnd(ldt, startOfDay);
+        }
+        if (o instanceof CharSequence cs) {
+            // "2025-09-04" veya "2025-09-04T10:20:00" ikisini de kaldırır
+            String s = cs.toString();
+            LocalDateTime parsed = s.length() <= 10 ? LocalDate.parse(s).atStartOfDay()
+                                                    : LocalDateTime.parse(s);
+            return startOrEnd(parsed, startOfDay);
+        }
+        return null;
+    }
+
+    private OffsetDateTime toOffsetDateTime(Object o, boolean startOfDay) {
+        if (o == null) return null;
+        if (o instanceof OffsetDateTime odt) {
+            LocalDateTime ldt = odt.toLocalDateTime();
+            ldt = startOrEnd(ldt, startOfDay);
+            return ldt.atZone(odt.getOffset()).toOffsetDateTime();
+        }
+        if (o instanceof LocalDateTime ldt) {
+            ldt = startOrEnd(ldt, startOfDay);
+            return ldt.atZone(zoneId).toOffsetDateTime();
+        }
+        if (o instanceof LocalDate d) {
+            LocalDateTime ldt = startOrEnd(d.atStartOfDay(), startOfDay);
+            return ldt.atZone(zoneId).toOffsetDateTime();
+        }
+        if (o instanceof Date d) {
+            LocalDateTime ldt = Instant.ofEpochMilli(d.getTime()).atZone(zoneId).toLocalDateTime();
+            ldt = startOrEnd(ldt, startOfDay);
+            return ldt.atZone(zoneId).toOffsetDateTime();
+        }
+        if (o instanceof CharSequence cs) {
+            String s = cs.toString();
+            // "2025-09-04" veya "2025-09-04T00:00:00+03:00"
+            try {
+                OffsetDateTime parsed = OffsetDateTime.parse(s);
+                LocalDateTime ldt = startOrEnd(parsed.toLocalDateTime(), startOfDay);
+                return ldt.atZone(parsed.getOffset()).toOffsetDateTime();
+            } catch (Exception ignore) {
+                LocalDateTime ldt = toLocalDateTime(s, startOfDay);
+                return ldt == null ? null : ldt.atZone(zoneId).toOffsetDateTime();
+            }
+        }
+        return null;
+    }
+
+    private Date toDate(Object o, boolean startOfDay) {
+        if (o == null) return null;
+        if (o instanceof Date d) return d;
+        if (o instanceof LocalDate d) {
+            LocalDateTime ldt = startOrEnd(d.atStartOfDay(), startOfDay);
+            return Date.from(ldt.atZone(zoneId).toInstant());
+        }
+        if (o instanceof LocalDateTime ldt) {
+            ldt = startOrEnd(ldt, startOfDay);
+            return Date.from(ldt.atZone(zoneId).toInstant());
+        }
+        if (o instanceof OffsetDateTime odt) {
+            LocalDateTime ldt = startOrEnd(odt.toLocalDateTime(), startOfDay);
+            return Date.from(ldt.atZone(odt.getOffset()).toInstant());
+        }
+        if (o instanceof CharSequence cs) {
+            LocalDateTime ldt = toLocalDateTime(cs, startOfDay);
+            return ldt == null ? null : Date.from(ldt.atZone(zoneId).toInstant());
+        }
+        return null;
+    }
+
+    private LocalDateTime startOrEnd(LocalDateTime ldt, boolean startOfDay) {
+        return startOfDay ? ldt.with(LocalTime.MIN) : ldt.with(LocalTime.MAX);
+    }
+}
+
+
+
+
+
+
+
+
 /* eslint-disable no-new */
 /* eslint-disable react/no-render-return-value */
 /* eslint-disable react/no-find-dom-node */
