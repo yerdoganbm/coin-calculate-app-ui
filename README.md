@@ -1,30 +1,12 @@
-package tr.gov.tcmb.ogmdfif.service;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.apache.poi.util.StringUtil;
-import org.springframework.data.domain.Sort;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import tr.gov.tcmb.ogmdfif.constant.KararTipiEnum;
-import tr.gov.tcmb.ogmdfif.constant.MektupTipEnum;
-import tr.gov.tcmb.ogmdfif.constant.SearchOperationEnum;
-import tr.gov.tcmb.ogmdfif.model.entity.*;
-import tr.gov.tcmb.ogmdfif.repository.LetterItemRepository;
-import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
-import tr.gov.tcmb.ogmdfif.repository.specs.GenericSpecification;
-import tr.gov.tcmb.ogmdfif.repository.specs.SearchCriteria;
-
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.util.*;
-import java.util.stream.Collectors;
-
+// LetterRequestTransactionsServiceImpl.java
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class LetterRequestTransactionsServiceImpl implements LetterRequestTransactionService {
+
+    private static final String CREATED_COL   = "createdDate";       // entity alanın createdAt ise burayı "createdAt" yap
+    private static final String FIRST_PAY_COL = "firstPaymentDate";  // entity alan adın
+    private static final String LAST_PAY_COL  = "lastPaymentDate";   // entity alan adın
 
     private final LetterRequestRepository letterRequestRepository;
     private final ProvizyonIslemleriService provizyonIslemleriService;
@@ -32,107 +14,132 @@ public class LetterRequestTransactionsServiceImpl implements LetterRequestTransa
 
     @Override
     @Transactional(readOnly = true)
-    public List<LetterRequest> listLetterRequest(LocalDate ilkOdemeTarihiDate, LocalDate sonOdemeTarihiDate, KararTipiEnum belgeTip,
-                                                 Integer belgeNo, Integer belgeYil, String kararNo, String vkn,
-                                                 String tckn, MektupTipEnum mektupTipEnum) throws Exception {
+    public List<LetterRequest> listLetterRequest(
+            // 1) Partition key (createdDate) için UI’den gelen yeni alanlar:
+            LocalDate first2,               // createdDate alt sınır (dahil)
+            LocalDate last2,                // createdDate üst sınır (dahil)
+            // 2) Ödeme tarihi filtreleri (bağımsız):
+            LocalDate firstDate,            // firstPaymentDate alt sınır
+            LocalDate lastDate,             // lastPaymentDate üst sınır
+            KararTipiEnum belgeTip,
+            Integer belgeNo,
+            Integer belgeYil,
+            String kararNo,
+            String vkn,
+            String tckn,
+            MektupTipEnum mektupTipEnum) throws Exception {
 
         log.info("Letter Request listeleme işlemi başladı.");
         GenericSpecification<LetterRequest> spec = new GenericSpecification<>();
 
         List<String> subeIdList = provizyonIslemleriService.getSubeIdList();
 
-        if (Objects.nonNull(belgeTip)) {
+        // ---- Diğer sabit filtreler ----
+        if (belgeTip != null) {
             spec.add(new SearchCriteria("tahakkukTuru", belgeTip.getAdi(), SearchOperationEnum.EQUAL));
         }
-
-        if (Objects.nonNull(belgeNo)) {
+        if (belgeNo != null) {
             spec.add(new SearchCriteria("belgeNo", String.valueOf(belgeNo), SearchOperationEnum.EQUAL));
         }
-
         spec.add(new SearchCriteria("requestTypeId",
                 MektupTipEnum.convertMektupTipToRequestTypeId(mektupTipEnum),
                 SearchOperationEnum.EQUAL));
-
-        if (Objects.nonNull(belgeYil)) {
+        if (belgeYil != null) {
             spec.add(new SearchCriteria("belgeYil", belgeYil, SearchOperationEnum.EQUAL));
         }
-
-        if (StringUtil.isNotBlank(kararNo)) {
+        if (org.apache.poi.util.StringUtil.isNotBlank(kararNo)) {
             spec.add(new SearchCriteria("kararNoAdi", kararNo, SearchOperationEnum.EQUAL));
         }
-
-        if (StringUtil.isNotBlank(vkn)) {
+        if (org.apache.poi.util.StringUtil.isNotBlank(vkn)) {
             spec.add(new SearchCriteria("firmaVkn", vkn, SearchOperationEnum.EQUAL));
         }
-
-        if (StringUtil.isNotBlank(tckn)) {
+        if (org.apache.poi.util.StringUtil.isNotBlank(tckn)) {
             spec.add(new SearchCriteria("ureticiTckn", tckn, SearchOperationEnum.EQUAL));
         }
-
         spec.add(new SearchCriteria("branchId", subeIdList, SearchOperationEnum.IN));
 
-        // ---- Tarih aralığı (createdAt partition key ise) ----
-        if (ilkOdemeTarihiDate != null && sonOdemeTarihiDate != null) {
-            // Service → sadece LocalDate ver. GenericSpecification:
-            //   LocalDate alanı için:  >= l AND < (u+1)
-            //   OffsetDateTime alanı için: >= u00:00 AND < (u+1)00:00
+        // =========================================================
+        // 1) PARTITION KEY: createdDate filtresi (first2 / last2)
+        // =========================================================
+        if (first2 != null && last2 != null) {
+            // GenericSpecification: [l, u] → >= l AND < (u+1)
             spec.add(new SearchCriteria(
-                    "createdAt",
-                    Arrays.asList(ilkOdemeTarihiDate, sonOdemeTarihiDate),
+                    CREATED_COL,
+                    Arrays.asList(first2, last2),
                     SearchOperationEnum.BETWEEN_INCLUSIVE
             ));
+
+            // Aynı 2 aylık dönemdeyse tek partition’a indir (clamp)
+            if (sameTwoMonthPeriod(first2, last2)) {
+                LocalDate pStart = twoMonthPeriodStart(first2);             // dahil
+                LocalDate pEndEx = twoMonthPeriodEndExclusive(first2);      // hariç
+                // [pStart, pEndEx-1] → >= pStart AND < pEndEx
+                spec.add(new SearchCriteria(
+                        CREATED_COL,
+                        Arrays.asList(pStart, pEndEx.minusDays(1)),
+                        SearchOperationEnum.BETWEEN_INCLUSIVE
+                ));
+            }
+        } else if (first2 != null) {
+            // sadece alt sınır
+            spec.add(new SearchCriteria(CREATED_COL, first2, SearchOperationEnum.GREATER_THAN_EQUAL));
+        } else if (last2 != null) {
+            // sadece üst sınır (dahil)
+            spec.add(new SearchCriteria(CREATED_COL, last2, SearchOperationEnum.LESS_THAN_EQUAL));
         }
 
-        // ---- Partition clamp (2 aylık dönem) → tek partition’a indirir ----
-        if (ilkOdemeTarihiDate != null
-                && sonOdemeTarihiDate != null
-                && sameTwoMonthPeriod(ilkOdemeTarihiDate, sonOdemeTarihiDate)) {
-
-            LocalDate periodStart = twoMonthPeriodStart(ilkOdemeTarihiDate);     // dahil
-            LocalDate periodEndExclusive = twoMonthPeriodEndExclusive(ilkOdemeTarihiDate); // hariç
-
-            // GenericSpecification [l, u] →  >= l AND < (u+1)
-            // Burada u = periodEndExclusive.minusDays(1) verince < periodEndExclusive elde ederiz.
+        // =========================================================
+        // 2) ÖDEME TARİHLERİ: firstPaymentDate / lastPaymentDate
+        //    (createdDate’den bağımsız, ek AND kriterleri)
+        // =========================================================
+        if (firstDate != null && lastDate != null) {
             spec.add(new SearchCriteria(
-                    "createdAt",
-                    Arrays.asList(periodStart, periodEndExclusive.minusDays(1)),
+                    FIRST_PAY_COL,
+                    Arrays.asList(firstDate, lastDate),
                     SearchOperationEnum.BETWEEN_INCLUSIVE
             ));
+            spec.add(new SearchCriteria(
+                    LAST_PAY_COL,
+                    Arrays.asList(firstDate, lastDate),
+                    SearchOperationEnum.BETWEEN_INCLUSIVE
+            ));
+        } else {
+            if (firstDate != null) {
+                spec.add(new SearchCriteria(FIRST_PAY_COL, firstDate, SearchOperationEnum.GREATER_THAN_EQUAL));
+                spec.add(new SearchCriteria(LAST_PAY_COL, firstDate, SearchOperationEnum.GREATER_THAN_EQUAL));
+            }
+            if (lastDate != null) {
+                spec.add(new SearchCriteria(FIRST_PAY_COL, lastDate, SearchOperationEnum.LESS_THAN_EQUAL));
+                spec.add(new SearchCriteria(LAST_PAY_COL,  lastDate,  SearchOperationEnum.LESS_THAN_EQUAL));
+            }
         }
 
-        return letterRequestRepository.findAll(spec, Sort.by(Sort.Direction.DESC, "createdAt"));
+        // Sıralama: createdDate’e göre (partition key)
+        return letterRequestRepository.findAll(spec, Sort.by(Sort.Direction.DESC, CREATED_COL));
     }
 
-    // 2 aylık dönem başlangıcı: (1-2),(3-4),(5-6),(7-8),(9-10),(11-12)
+    // -------- 2 aylık dönem yardımcıları --------
     private static LocalDate twoMonthPeriodStart(LocalDate d) {
         int m = d.getMonthValue();
-        int startMonth = ((m - 1) / 2) * 2 + 1;
+        int startMonth = ((m - 1) / 2) * 2 + 1;  // 1,3,5,7,9,11
         return LocalDate.of(d.getYear(), startMonth, 1);
     }
-
-    // 2 aylık dönem bitişi (exclusive)
     private static LocalDate twoMonthPeriodEndExclusive(LocalDate d) {
         return twoMonthPeriodStart(d).plusMonths(2);
     }
-
     private static boolean sameTwoMonthPeriod(LocalDate d1, LocalDate d2) {
         return twoMonthPeriodStart(d1).equals(twoMonthPeriodStart(d2));
     }
 
-    // (Diğer metotların aynı kalabilir)
     @Transactional(readOnly = true)
     @Override
     public Map<UUID, List<LetterItem>> loadItemByLetterRequestIds(List<UUID> requestIds) {
-        if (requestIds == null || requestIds.isEmpty()) {
-            return new HashMap<>();
-        }
+        if (requestIds == null || requestIds.isEmpty()) return new HashMap<>();
         return letterItemRepository.findAllByLetterRequestIds(requestIds)
                 .stream()
                 .collect(Collectors.groupingBy(LetterItem::getRequestId));
     }
 }
-
-
 
 
 
@@ -443,9 +450,6 @@ public class GenericSpecification<T> implements Specification<T> {
 
 
 
-
-
- 
 
 
 
