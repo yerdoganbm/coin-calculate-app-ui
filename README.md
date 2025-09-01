@@ -1,4 +1,34 @@
- @Override
+package tr.gov.tcmb.ogmdfif.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.util.StringUtil;
+import org.springframework.data.domain.Sort;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import tr.gov.tcmb.ogmdfif.constant.KararTipiEnum;
+import tr.gov.tcmb.ogmdfif.constant.MektupTipEnum;
+import tr.gov.tcmb.ogmdfif.constant.SearchOperationEnum;
+import tr.gov.tcmb.ogmdfif.model.entity.*;
+import tr.gov.tcmb.ogmdfif.repository.LetterItemRepository;
+import tr.gov.tcmb.ogmdfif.repository.LetterRequestRepository;
+import tr.gov.tcmb.ogmdfif.repository.specs.GenericSpecification;
+import tr.gov.tcmb.ogmdfif.repository.specs.SearchCriteria;
+
+import java.time.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class LetterRequestTransactionsServiceImpl implements LetterRequestTransactionService {
+
+    private final LetterRequestRepository letterRequestRepository;
+    private final ProvizyonIslemleriService provizyonIslemleriService;
+    private final LetterItemRepository letterItemRepository;
+
+    @Override
     @Transactional(readOnly = true)
     public List<LetterRequest> listLetterRequest(LocalDate ilkOdemeTarihiDate, LocalDate sonOdemeTarihiDate, KararTipiEnum belgeTip,
                                                  Integer belgeNo, Integer belgeYil, String kararNo, String vkn,
@@ -45,7 +75,7 @@
             genericSpecification.add(new SearchCriteria("createdAt",
                     Arrays.asList(lowerInclusive, upperInclusive), SearchOperationEnum.BETWEEN_INCLUSIVE));
         }
-        
+
         //Partition clamp(2 aylık dönem) - tek partitona indirir
         if (ilkOdemeTarihiDate != null && sonOdemeTarihiDate != null && sameTwoMonthPeriod(ilkOdemeTarihiDate, sonOdemeTarihiDate)) {
 
@@ -59,6 +89,51 @@
 
         return letterRequestRepository.findAll(genericSpecification, Sort.by(Sort.Direction.DESC, "createdAt"));
     }
+
+    //2 aylık dönem başlangıcı (1-2,3-4, 5-6,7-8,9-10,11-12)
+    private static LocalDate twoMonthPeriodStart(LocalDate d) {
+        int m = d.getMonthValue();
+        int startMonth = ((m - 1) / 2) * 2 + 1;
+        return LocalDate.of(d.getYear(), startMonth, 1);
+    }
+
+    //2 aylıkı dönem bitişi
+    private static LocalDate twoMonthPeriodEndExclusive(LocalDate d) {
+        return twoMonthPeriodStart(d).plusMonths(2);
+    }
+
+    private static boolean sameTwoMonthPeriod(LocalDate d1, LocalDate d2) {
+        return twoMonthPeriodStart(d1).equals(twoMonthPeriodStart(d2));
+    }
+
+    private static OffsetDateTime startOfDayUtc(LocalDate d) {
+        LocalDateTime localDateTime = d.atStartOfDay();
+        return localDateTime.atOffset(ZoneOffset.UTC);
+
+    }
+
+    private static OffsetDateTime endOfDayUtc(LocalDate d) {
+        return d.atTime(LocalTime.MAX).atOffset(ZoneOffset.UTC);
+
+    }
+
+
+    @Transactional(readOnly = true)
+    @Override
+    public Map<UUID, List<LetterItem>> loadItemByLetterRequestIds(List<UUID> requestIds) {
+        if (requestIds == null || requestIds.isEmpty()) {
+            return new HashMap<>();
+        }
+
+        return letterItemRepository.findAllByLetterRequestIds(requestIds)
+                .stream()
+                .collect(Collectors.groupingBy(LetterItem::getRequestId));
+    }
+
+}
+
+
+
 
 
  
