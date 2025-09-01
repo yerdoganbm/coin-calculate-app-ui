@@ -5,23 +5,17 @@ import tr.gov.tcmb.ogmdfif.constant.SearchOperationEnum;
 
 import javax.persistence.criteria.CriteriaBuilder;
 import javax.persistence.criteria.CriteriaQuery;
+import javax.persistence.criteria.Expression;
 import javax.persistence.criteria.Predicate;
 import javax.persistence.criteria.Root;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-import java.util.Locale;
+import java.time.*;
+import java.util.*;
 
 public class GenericSpecification<T> implements Specification<T> {
 
-    private List<SearchCriteria> list;
-
-    public GenericSpecification() {
-        this.list = new ArrayList<>();
-    }
+    private final List<SearchCriteria> list = new ArrayList<>();
+    // Projenin varsayılan TZ'si (gerekirse değiştir)
+    private static final ZoneId ZONE = ZoneId.of("Europe/Istanbul");
 
     public void add(SearchCriteria criteria) {
         list.add(criteria);
@@ -29,140 +23,289 @@ public class GenericSpecification<T> implements Specification<T> {
 
     @Override
     public Predicate toPredicate(Root<T> root, CriteriaQuery<?> query, CriteriaBuilder builder) {
-
-        //create a new predicate list
         List<Predicate> predicates = new ArrayList<>();
 
-        //add criteria to predicates
         for (SearchCriteria criteria : list) {
-            if (criteria.getValue() instanceof Date){
-                if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN_EQUAL)){
-                    predicates.add(builder.greaterThanOrEqualTo(root.get(criteria.getKey()), (Date) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.LESS_THAN_EQUAL)){
-                    predicates.add(builder.lessThanOrEqualTo(root.get(criteria.getKey()), (Date) criteria.getValue()));
-                }
-                if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN)){
-                    predicates.add(builder.greaterThan(root.get(criteria.getKey()), (Date) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.LESS_THAN)){
-                    predicates.add(builder.lessThan(root.get(criteria.getKey()), (Date) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.EQUAL)){
-                    predicates.add(builder.equal(root.get(criteria.getKey()), (Date) criteria.getValue()));
-                }
-            }
-            else if (criteria.getValue() instanceof LocalDate){
-                if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN_EQUAL)){
-                    predicates.add(builder.greaterThanOrEqualTo(root.get(criteria.getKey()), (LocalDate) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.LESS_THAN_EQUAL)){
-                    predicates.add(builder.lessThanOrEqualTo(root.get(criteria.getKey()), (LocalDate) criteria.getValue()));
-                }
-                if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN)){
-                    predicates.add(builder.greaterThan(root.get(criteria.getKey()), (LocalDate) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.LESS_THAN)){
-                    predicates.add(builder.lessThan(root.get(criteria.getKey()), (LocalDate) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.EQUAL)){
-                    predicates.add(builder.equal(root.get(criteria.getKey()), (LocalDate) criteria.getValue()));
-                }
-            }
-            else if (criteria.getValue() instanceof LocalDateTime){
-                if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN_EQUAL)){
-                    predicates.add(builder.greaterThanOrEqualTo(root.get(criteria.getKey()), (LocalDateTime) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.LESS_THAN_EQUAL)){
-                    predicates.add(builder.lessThanOrEqualTo(root.get(criteria.getKey()), (LocalDateTime) criteria.getValue()));
-                }
-                if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN)){
-                    predicates.add(builder.greaterThan(root.get(criteria.getKey()), (LocalDateTime) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.LESS_THAN)){
-                    predicates.add(builder.lessThan(root.get(criteria.getKey()), (LocalDateTime) criteria.getValue()));
-                }
-                else if(criteria.getOperation().equals(SearchOperationEnum.EQUAL)){
-                    predicates.add(builder.equal(root.get(criteria.getKey()), (LocalDateTime) criteria.getValue()));
-                }
-            }
-            else if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN)) {
-                predicates.add(builder.greaterThan(
-                            root.get(criteria.getKey()), criteria.getValue().toString()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.LESS_THAN)) {
-                predicates.add(builder.lessThan(
-                        root.get(criteria.getKey()), criteria.getValue().toString()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.GREATER_THAN_EQUAL)) {
-                predicates.add(builder.greaterThanOrEqualTo(
-                        root.get(criteria.getKey()), criteria.getValue().toString()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.LESS_THAN_EQUAL)) {
-                predicates.add(builder.lessThanOrEqualTo(
-                        root.get(criteria.getKey()), criteria.getValue().toString()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.NOT_EQUAL)) {
-                predicates.add(builder.notEqual(
-                        root.get(criteria.getKey()), criteria.getValue()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.EQUAL)) {
-                predicates.add(builder.equal(
-                        root.get(criteria.getKey()), criteria.getValue()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.MATCH)) {
-                predicates.add(builder.like(
-                        builder.upper(
-                                builder.function(
-                                        "replace",
-                                        String.class,
-                                        builder.function(
-                                                "replace",
-                                                String.class,
-                                                root.get(criteria.getKey()),
-                                                builder.literal("i"),
-                                                builder.literal("İ")
-                                        ),
-                                        builder.literal("ı"),
-                                        builder.literal("I")
-                                )
-                        ),
-                        "%" + criteria.getValue().toString().toUpperCase(Locale.forLanguageTag("tr-TR")).trim() + "%"
-                ));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.MATCH_END)) {
-                predicates.add(builder.like(
-                        builder.lower(root.get(criteria.getKey())),
-                        criteria.getValue().toString().toLowerCase() + "%"));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.MATCH_START)) {
-                predicates.add(builder.like(
-                        builder.lower(root.get(criteria.getKey())),
-                        "%" + criteria.getValue().toString().toLowerCase()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.IN)) {
-                predicates.add(builder.in(root.get(criteria.getKey())).value(criteria.getValue()));
-            } else if (criteria.getOperation().equals(SearchOperationEnum.NOT_IN)) {
-                predicates.add(builder.not(root.get(criteria.getKey())).in(criteria.getValue()));
-            }
-            else if(criteria.getOperation().equals(SearchOperationEnum.IS_NULL)){
-                predicates.add(builder.isNull(root.get(criteria.getKey())));
-            }
-            else if(criteria.getOperation().equals(SearchOperationEnum.IS_NOT_NULL)){
-                predicates.add(builder.isNotNull(root.get(criteria.getKey())));
-            }else if(criteria.getOperation().equals(SearchOperationEnum.BEETWEEN_INCLUSIVE)){
-                List<?> values = (List<?>) criteria.getValue();
-                if(values.size() > 2){
-                    Object lower = values.get(0);
-                    Object upper = values.get(1);
+            Object value = criteria.getValue();
+            String key = criteria.getKey();
+            SearchOperationEnum op = criteria.getOperation();
 
-                    if(lower instanceof LocalDate && upper instanceof LocalDate){
-                        predicates.add(builder.between(root.get(criteria.getKey()), (LocalDate) lower, (LocalDate) upper));
-                    }else if(lower instanceof LocalDateTime && upper instanceof LocalDateTime){
-                        predicates.add(builder.between(root.get(criteria.getKey()), (LocalDateTime) lower, (LocalDateTime) upper));
-                    }else if(lower instanceof Date && upper instanceof Date){
-                        predicates.add(builder.between(root.get(criteria.getKey()), (Date) lower, (Date) upper));
-                    }else{
-                        predicates.add(builder.between(root.get(criteria.getKey()), lower.toString(), upper.toString()));
-                    }
+            // ----- Tarih/Zaman tipleri (tip-güvenli) -----
+            if (value instanceof LocalDate) {
+                LocalDate v = (LocalDate) value;
+                switch (op) {
+                    case GREATER_THAN_EQUAL:
+                        predicates.add(builder.greaterThanOrEqualTo(root.get(key), v)); break;
+                    case LESS_THAN_EQUAL:
+                        predicates.add(builder.lessThanOrEqualTo(root.get(key), v)); break;
+                    case GREATER_THAN:
+                        predicates.add(builder.greaterThan(root.get(key), v)); break;
+                    case LESS_THAN:
+                        predicates.add(builder.lessThan(root.get(key), v)); break;
+                    case EQUAL:
+                        predicates.add(builder.equal(root.get(key), v)); break;
+                    default: break;
                 }
+                continue;
+            }
+            if (value instanceof LocalDateTime) {
+                LocalDateTime v = (LocalDateTime) value;
+                switch (op) {
+                    case GREATER_THAN_EQUAL:
+                        predicates.add(builder.greaterThanOrEqualTo(root.get(key), v)); break;
+                    case LESS_THAN_EQUAL:
+                        predicates.add(builder.lessThanOrEqualTo(root.get(key), v)); break;
+                    case GREATER_THAN:
+                        predicates.add(builder.greaterThan(root.get(key), v)); break;
+                    case LESS_THAN:
+                        predicates.add(builder.lessThan(root.get(key), v)); break;
+                    case EQUAL:
+                        predicates.add(builder.equal(root.get(key), v)); break;
+                    default: break;
+                }
+                continue;
+            }
+            if (value instanceof OffsetDateTime) {
+                OffsetDateTime v = (OffsetDateTime) value;
+                switch (op) {
+                    case GREATER_THAN_EQUAL:
+                        predicates.add(builder.greaterThanOrEqualTo(root.get(key), v)); break;
+                    case LESS_THAN_EQUAL:
+                        predicates.add(builder.lessThanOrEqualTo(root.get(key), v)); break;
+                    case GREATER_THAN:
+                        predicates.add(builder.greaterThan(root.get(key), v)); break;
+                    case LESS_THAN:
+                        predicates.add(builder.lessThan(root.get(key), v)); break;
+                    case EQUAL:
+                        predicates.add(builder.equal(root.get(key), v)); break;
+                    default: break;
+                }
+                continue;
+            }
+            if (value instanceof Date) {
+                Date v = (Date) value;
+                switch (op) {
+                    case GREATER_THAN_EQUAL:
+                        predicates.add(builder.greaterThanOrEqualTo(root.get(key), v)); break;
+                    case LESS_THAN_EQUAL:
+                        predicates.add(builder.lessThanOrEqualTo(root.get(key), v)); break;
+                    case GREATER_THAN:
+                        predicates.add(builder.greaterThan(root.get(key), v)); break;
+                    case LESS_THAN:
+                        predicates.add(builder.lessThan(root.get(key), v)); break;
+                    case EQUAL:
+                        predicates.add(builder.equal(root.get(key), v)); break;
+                    default: break;
+                }
+                continue;
+            }
+
+            // ----- Genel tipler -----
+            switch (op) {
+                case GREATER_THAN: {
+                    @SuppressWarnings("unchecked")
+                    Comparable<Object> cmp = (Comparable<Object>) value;
+                    predicates.add(builder.greaterThan(root.get(key), cmp));
+                    break;
+                }
+                case LESS_THAN: {
+                    @SuppressWarnings("unchecked")
+                    Comparable<Object> cmp = (Comparable<Object>) value;
+                    predicates.add(builder.lessThan(root.get(key), cmp));
+                    break;
+                }
+                case GREATER_THAN_EQUAL: {
+                    @SuppressWarnings("unchecked")
+                    Comparable<Object> cmp = (Comparable<Object>) value;
+                    predicates.add(builder.greaterThanOrEqualTo(root.get(key), cmp));
+                    break;
+                }
+                case LESS_THAN_EQUAL: {
+                    @SuppressWarnings("unchecked")
+                    Comparable<Object> cmp = (Comparable<Object>) value;
+                    predicates.add(builder.lessThanOrEqualTo(root.get(key), cmp));
+                    break;
+                }
+                case NOT_EQUAL:
+                    predicates.add(builder.notEqual(root.get(key), value));
+                    break;
+                case EQUAL:
+                    predicates.add(builder.equal(root.get(key), value));
+                    break;
+
+                case MATCH: {
+                    // Türkçe I/i için normalize edilerek case-insensitive LIKE
+                    Expression<String> normalized = builder.upper(
+                        builder.function(
+                            "replace", String.class,
+                            builder.function("replace", String.class,
+                                root.get(key),
+                                builder.literal("i"), builder.literal("İ")),
+                            builder.literal("ı"), builder.literal("I")
+                        )
+                    );
+                    String needle = "%" + value.toString().toUpperCase(Locale.forLanguageTag("tr-TR")).trim() + "%";
+                    predicates.add(builder.like(normalized, needle));
+                    break;
+                }
+                case MATCH_START:
+                    // value%
+                    predicates.add(builder.like(builder.lower(root.get(key)),
+                            value.toString().toLowerCase() + "%"));
+                    break;
+                case MATCH_END:
+                    // %value
+                    predicates.add(builder.like(builder.lower(root.get(key)),
+                            "%" + value.toString().toLowerCase()));
+                    break;
+
+                case IN: {
+                    Collection<?> vals = coerceToCollection(value);
+                    if (vals != null && !vals.isEmpty()) {
+                        predicates.add(root.get(key).in(vals));
+                    }
+                    break;
+                }
+                case NOT_IN: {
+                    Collection<?> vals = coerceToCollection(value);
+                    if (vals != null && !vals.isEmpty()) {
+                        predicates.add(builder.not(root.get(key).in(vals)));
+                    }
+                    break;
+                }
+                case IS_NULL:
+                    predicates.add(builder.isNull(root.get(key)));
+                    break;
+                case IS_NOT_NULL:
+                    predicates.add(builder.isNotNull(root.get(key)));
+                    break;
+
+                case BETWEEN_INCLUSIVE: { // <-- ENUM adını böyle düzelt
+                    List<?> values = firstTwo(value);
+                    if (values != null && values.get(0) != null && values.get(1) != null) {
+                        Object lower = values.get(0);
+                        Object upper = values.get(1);
+
+                        Class<?> attrType = root.get(key).getJavaType();
+
+                        if (LocalDate.class.equals(attrType)) {
+                            LocalDate l = toLocalDate(lower);
+                            LocalDate u = toLocalDate(upper);
+                            if (l != null && u != null) {
+                                predicates.add(builder.between(root.get(key), l, u));
+                            }
+                        } else if (LocalDateTime.class.equals(attrType)) {
+                            LocalDateTime l = toLocalDateTime(lower, true);
+                            LocalDateTime u = toLocalDateTime(upper, false); // gün sonu dahil
+                            if (l != null && u != null) {
+                                predicates.add(builder.between(root.get(key), l, u));
+                            }
+                        } else if (OffsetDateTime.class.equals(attrType)) {
+                            OffsetDateTime l = toOffsetDateTime(lower, true);
+                            OffsetDateTime u = toOffsetDateTime(upper, false); // gün sonu dahil
+                            if (l != null && u != null) {
+                                predicates.add(builder.between(root.get(key), l, u));
+                            }
+                        } else if (Date.class.isAssignableFrom(attrType)) {
+                            Date l = toDate(lower, true);
+                            Date u = toDate(upper, false); // gün sonu dahil
+                            if (l != null && u != null) {
+                                predicates.add(builder.between(root.get(key), l, u));
+                            }
+                        }
+                        // String fallback YOK → tip uyuşmazlığı hataları engellenir
+                    }
+                    break;
+                }
+                default:
+                    break;
             }
         }
 
         return builder.and(predicates.toArray(new Predicate[0]));
     }
 
+    // ---------- Helpers ----------
+
+    private static Collection<?> coerceToCollection(Object value) {
+        if (value == null) return Collections.emptyList();
+        if (value instanceof Collection) return (Collection<?>) value;
+        if (value.getClass().isArray()) {
+            int len = java.lang.reflect.Array.getLength(value);
+            List<Object> list = new ArrayList<>(len);
+            for (int i = 0; i < len; i++) list.add(java.lang.reflect.Array.get(value, i));
+            return list;
+        }
+        return Collections.singletonList(value);
+    }
+
+    private static List<?> firstTwo(Object val) {
+        if (val == null) return null;
+        if (val instanceof List) {
+            List<?> l = (List<?>) val;
+            if (l.size() >= 2) return Arrays.asList(l.get(0), l.get(1));
+        } else if (val instanceof Object[]) {
+            Object[] arr = (Object[]) val;
+            if (arr.length >= 2) return Arrays.asList(arr[0], arr[1]);
+        }
+        return null;
+    }
+
+    private static LocalDate toLocalDate(Object o) {
+        if (o instanceof LocalDate) return (LocalDate) o;
+        if (o instanceof LocalDateTime) return ((LocalDateTime) o).toLocalDate();
+        if (o instanceof OffsetDateTime) return ((OffsetDateTime) o).toLocalDate();
+        if (o instanceof Date)
+            return Instant.ofEpochMilli(((Date) o).getTime()).atZone(ZONE).toLocalDate();
+        if (o instanceof CharSequence) return LocalDate.parse(o.toString());
+        return null;
+    }
+
+    private static LocalDateTime toLocalDateTime(Object o, boolean startOfDay) {
+        LocalDateTime ldt = null;
+        if (o instanceof LocalDateTime) ldt = (LocalDateTime) o;
+        else if (o instanceof LocalDate) ldt = ((LocalDate) o).atStartOfDay();
+        else if (o instanceof OffsetDateTime) ldt = ((OffsetDateTime) o).toLocalDateTime();
+        else if (o instanceof Date) ldt = Instant.ofEpochMilli(((Date) o).getTime()).atZone(ZONE).toLocalDateTime();
+        else if (o instanceof CharSequence) {
+            String s = o.toString();
+            ldt = (s.length() <= 10) ? LocalDate.parse(s).atStartOfDay() : LocalDateTime.parse(s);
+        }
+        if (ldt == null) return null;
+        return startOfDay ? ldt.with(LocalTime.MIN) : ldt.with(LocalTime.MAX);
+    }
+
+    private static OffsetDateTime toOffsetDateTime(Object o, boolean startOfDay) {
+        LocalDateTime ldt = null;
+        ZoneId zone = ZONE;
+        if (o instanceof OffsetDateTime) {
+            ldt = ((OffsetDateTime) o).toLocalDateTime();
+            zone = ((OffsetDateTime) o).getOffset();
+        } else if (o instanceof LocalDateTime) ldt = (LocalDateTime) o;
+        else if (o instanceof LocalDate) ldt = ((LocalDate) o).atStartOfDay();
+        else if (o instanceof Date) ldt = Instant.ofEpochMilli(((Date) o).getTime()).atZone(ZONE).toLocalDateTime();
+        else if (o instanceof CharSequence) {
+            String s = o.toString();
+            try {
+                OffsetDateTime parsed = OffsetDateTime.parse(s);
+                ldt = parsed.toLocalDateTime();
+                zone = parsed.getOffset();
+            } catch (Exception ignore) {
+                ldt = toLocalDateTime(s, startOfDay);
+            }
+        }
+        if (ldt == null) return null;
+        ldt = startOfDay ? ldt.with(LocalTime.MIN) : ldt.with(LocalTime.MAX);
+        return ldt.atZone(zone).toOffsetDateTime();
+    }
+
+    private static Date toDate(Object o, boolean startOfDay) {
+        if (o instanceof Date) return (Date) o;
+        LocalDateTime ldt = toLocalDateTime(o, startOfDay);
+        if (ldt == null) return null;
+        ldt = startOfDay ? ldt.with(LocalTime.MIN) : ldt.with(LocalTime.MAX);
+        return Date.from(ldt.atZone(ZONE).toInstant());
+    }
 }
 
 
