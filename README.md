@@ -1,3 +1,50 @@
+private String buildMailBody(List<LetterRequest> list) throws ValidationException {
+    if (list == null || list.isEmpty()) {
+        throw new ValidationException("Talep kaydı bulunamadı!");
+    }
+
+    StringBuilder html = new StringBuilder();
+    html.append("<div style='font-family:Arial,Helvetica,sans-serif;font-size:14px;'>");
+
+    for (LetterRequest e : list) {
+
+        boolean isFailed = ROW_POINT_FAILED_LIST.contains(LetterStatusEnum.getByKod(String.valueOf(e.getStatusId())));
+
+        // Hata varsa kırmızı arka plan, yoksa beyaz
+        String rowStyle = isFailed
+                ? "background:#d32f2f;color:#ffffff;"
+                : "background:#ffffff;color:#000000;";
+
+        // Tek satırda tüm alanları yan yana göstereceğiz
+        html.append("<table border='1' style='border-collapse:collapse;width:100%;margin:0 0 12px 0;'>")
+            .append("<tbody>")
+            .append("<tr style='").append(rowStyle).append("'>")
+            .append(td("Talep No: " + s(e.getId())))
+            .append(td("Mektup Tipi: " + s(MektupTipEnum.convertRequestTypeIdToMektupTip(e.getRequestTypeId()).getAdi())))
+            .append(td("Scope ID: " + s(ScopeTypeEnum.getBykod(Objects.toString(e.getScopeId(), "")).getAdi())))
+            .append(td("Scope Değeri: " + s(e.getScopeValue() != null ? e.getScopeValue() : "-")))
+            .append(td("İlk Ödeme Tarihi: " + fmtDate(e.getFirstPaymentDate())))
+            .append(td("Son Ödeme Tarihi: " + fmtDate(e.getLastPaymentDate())))
+            .append(td("Sorgu Durumu: " + s(LetterStatusEnum.getByKod(String.valueOf(e.getStatusId())).getAdi())))
+            .append(td("Sorgu Tarihi: " + e.getCreatedAt().format(TS_FMT)))
+            .append(td("Sorgu Durum Detay: " + s(e.getLastErrorMessage())))
+            .append("</tr>")
+            .append("</tbody>")
+            .append("</table>");
+    }
+
+    html.append("</div>");
+    return html.toString();
+}
+
+
+
+
+
+
+
+
+
 package tr.gov.tcmb.ogmdfif.service;
 
 import lombok.RequiredArgsConstructor;
