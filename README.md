@@ -1,3 +1,150 @@
+package your.pkg.util;
+
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.util.Objects;
+import java.util.Set;
+
+/**
+ * İş günü validasyon yardımcıları.
+ * Kurallar:
+ *   1) İlk ve son tarih iş günü olmalı.
+ *   2) (Dahil) iş günü sayısı en fazla 2 olmalı.
+ *
+ * Hata durumlarında IllegalArgumentException atar ve en yakın/uyumlu tarihi önerir.
+ */
+public final class BusinessDayValidator {
+
+    private BusinessDayValidator() {}
+
+    public static final int MAX_SPAN_INCLUSIVE = 2;
+
+    /* =======================
+       Public API
+       ======================= */
+
+    /** Tatilsiz (sadece hafta içi) kontrol için kolaylaştırıcı. */
+    public static void validateBusinessDates(LocalDate first, LocalDate last) {
+        validateBusinessDates(first, last, null);
+    }
+
+    /**
+     * İlk/son tarihleri iş günü ve (dahil) iş günü sayısı ≤ MAX_SPAN_INCLUSIVE kıstasıyla doğrular.
+     * Tatiller için holidays set'i verebilirsiniz; null/boş ise yalnızca hafta sonu dışlanır.
+     */
+    public static void validateBusinessDates(LocalDate first, LocalDate last, Set<LocalDate> holidays) {
+        Objects.requireNonNull(first, "İlk ödeme tarihi boş olamaz.");
+        Objects.requireNonNull(last,  "Son ödeme tarihi boş olamaz.");
+
+        if (last.isBefore(first)) {
+            throw new IllegalArgumentException("Son ödeme tarihi, ilk ödeme tarihinden önce olamaz.");
+        }
+
+        // 1) Son tarih iş günü değilse: önce onu düzelt (kullanıcıya öneri mesajı ile).
+        if (!isBusinessDay(last, holidays)) {
+            LocalDate suggestion = previousOrNextBusinessDayAround(last, holidays);
+            throw new IllegalArgumentException(
+                "Son ödeme tarihi iş günü değil: " + last +
+                ". En yakın iş günü: " + suggestion + ". Lütfen iş günü seçiniz.");
+        }
+
+        // 2) İlk tarih iş günü değilse: last iş günü olduğuna göre, kurala uyan first öner.
+        if (!isBusinessDay(first, holidays)) {
+            LocalDate compliantFirst = clampFirstForMaxSpanInclusive(last, MAX_SPAN_INCLUSIVE, holidays);
+            LocalDate nearestFirst   = nextBusinessDay(first, holidays);
+            String alt = nearestFirst.equals(compliantFirst) ? "" : " (alternatif en yakın iş günü: " + nearestFirst + ")";
+            throw new IllegalArgumentException(
+                "İlk ödeme tarihi iş günü değil: " + first +
+                ". Öneri (kurala uyar): " + compliantFirst + alt);
+        }
+
+        // 3) Her ikisi de iş günü → (dahil) iş günü sayısı ≤ 2 mi?
+        int spanInclusive = businessDaysBetweenInclusive(first, last, holidays);
+        if (spanInclusive > MAX_SPAN_INCLUSIVE) {
+            LocalDate sugLast = clampToMaxBusinessSpanInclusive(first, MAX_SPAN_INCLUSIVE, holidays);
+            throw new IllegalArgumentException(
+                "İki tarih arasındaki iş günü sayısı (dahil) en fazla " + MAX_SPAN_INCLUSIVE +
+                " olabilir. Şu an: " + spanInclusive + ". Son tarihi " + sugLast + " seçiniz.");
+        }
+    }
+
+    /* =======================
+       Core helpers
+       ======================= */
+
+    /** start..end aralığında (ikisi dahil) iş günü sayısı. */
+    public static int businessDaysBetweenInclusive(LocalDate start, LocalDate end, Set<LocalDate> holidays) {
+        int count = 0;
+        LocalDate d = start;
+        while (!d.isAfter(end)) {
+            if (isBusinessDay(d, holidays)) count++;
+            d = d.plusDays(1);
+        }
+        return count;
+    }
+
+    /** Tarih iş günü mü? (Hafta içi ve tatil değilse) */
+    public static boolean isBusinessDay(LocalDate d, Set<LocalDate> holidays) {
+        DayOfWeek w = d.getDayOfWeek();
+        boolean weekend = (w == DayOfWeek.SATURDAY || w == DayOfWeek.SUNDAY);
+        boolean holiday = holidays != null && holidays.contains(d);
+        return !weekend && !holiday;
+    }
+
+    /** Verilen tarihten itibaren ileriye doğru ilk iş gününü bulur (tarih iş günü ise kendisini döner). */
+    public static LocalDate nextBusinessDay(LocalDate d, Set<LocalDate> holidays) {
+        LocalDate cur = d;
+        while (!isBusinessDay(cur, holidays)) {
+            cur = cur.plusDays(1);
+        }
+        return cur;
+    }
+
+    /**
+     * Verilen tarihten geriye doğru ilk iş gününü dener; bulunamazsa ileriye bakar.
+     * (Genelde "last iş günü değil" senaryosunda kullanıcıya mantıklı bir öneri vermek için.)
+     */
+    public static LocalDate previousOrNextBusinessDayAround(LocalDate d, Set<LocalDate> holidays) {
+        LocalDate back = d;
+        for (int i = 0; i < 7; i++) { // makul sınır
+            back = back.minusDays(1);
+            if (isBusinessDay(back, holidays)) return back;
+        }
+        return nextBusinessDay(d, holidays);
+    }
+
+    /** first dâhil 'span'ıncı iş gününü verir → önerilen last. (span ≥ 1) */
+    public static LocalDate clampToMaxBusinessSpanInclusive(LocalDate first, int span, Set<LocalDate> holidays) {
+        if (span < 1) throw new IllegalArgumentException("span >= 1 olmalı");
+        if (!isBusinessDay(first, holidays)) first = nextBusinessDay(first, holidays);
+        LocalDate d = first;
+        int seen = 1; // first sayıldı
+        while (seen < span) {
+            d = d.plusDays(1);
+            if (isBusinessDay(d, holidays)) seen++;
+        }
+        return d;
+    }
+
+    /**
+     * last dâhil olacak ve (dahil) iş günü sayısı ≤ span kalacak en uygun first'ü üretir.
+     * Varsayım: last bir iş günüdür.
+     */
+    public static LocalDate clampFirstForMaxSpanInclusive(LocalDate last, int span, Set<LocalDate> holidays) {
+        if (span < 1) throw new IllegalArgumentException("span >= 1 olmalı");
+        if (!isBusinessDay(last, holidays)) last = previousOrNextBusinessDayAround(last, holidays);
+        int needBefore = span - 1; // last'ı saydık
+        LocalDate d = last;
+        while (needBefore > 0) {
+            d = d.minusDays(1);
+            if (isBusinessDay(d, holidays)) needBefore--;
+        }
+        return d;
+    }
+}
+
+
+
 
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
