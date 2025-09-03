@@ -1,3 +1,176 @@
+package tr.gov.tcmb.ogmdfif.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+import tr.gov.tcmb.ogmdfif.constant.*;
+import tr.gov.tcmb.ogmdfif.exception.ValidationException;
+import tr.gov.tcmb.ogmdfif.model.MailContext;
+import tr.gov.tcmb.ogmdfif.model.MailMessage;
+import tr.gov.tcmb.ogmdfif.model.entity.LetterRequest;
+import tr.gov.tcmb.ogmdfif.util.Constants;
+import tr.gov.tcmb.ogmdfif.util.DateUtils;
+
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class TopluTalepOzetHandler implements MailHandler {
+
+    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
+    private static final List<LetterStatusEnum> ROW_POINT_FAILED_LIST = Arrays.asList(LetterStatusEnum.FAILED,
+            LetterStatusEnum.ALL_FAILED,LetterStatusEnum.PARTIAL_SENT,LetterStatusEnum.VALIDATION_FAIL);
+
+    @Override
+    public boolean supports(MailTypeEnum type) {
+        return type == MailTypeEnum.TOPLU_TALEP_OZET;
+    }
+
+    @Override
+    public MailMessage compose(MailContext ctx) throws ValidationException {
+
+        List<LetterRequest> requests = ctx.getRequests();
+        LetterRequest letterRequest = null;
+        if(!requests.isEmpty()) letterRequest = requests.get(0);
+
+        String body =  ctx.getBodyOverride() != null ? ctx.getBodyOverride() : this.buildMailBody(ctx.getRequests());
+        MailMessage.MailMessageBuilder ms = MailMessage.builder()
+                .from(Constants.OGM_BIRIM_MAIL)
+                //.from("yunus.erdogan@tcmb.gov.tr")
+                .to(ctx.getTo())
+                //.to("yunus.erdogan@tcmb.gov.tr")
+                //.bcc(TO_LIST_TEAM) //todo kaldırılacak
+                .subject(ctx.getSubjectOverride())
+                .htmlBody(body);
+
+        if (Objects.nonNull(letterRequest) &&  Objects.nonNull(letterRequest.getScopeValue())) {
+            ms.cc(Constants.OGM_BIRIM_MAIL);
+        }
+
+        return ms.build();
+    }
+
+    private String buildMailBody(List<LetterRequest> list) throws ValidationException {
+        if (list == null || list.isEmpty()) {
+            throw new ValidationException("Talep kaydı bulunamadı!");
+        }
+
+        StringBuilder html = new StringBuilder();
+        html.append("<div style='font-family:Arial,Helvetica,sans-serif;font-size:14px;'>");
+
+        for (LetterRequest e : list) {
+
+            boolean isFailed = ROW_POINT_FAILED_LIST.contains(LetterStatusEnum.getByKod(String.valueOf(e.getStatusId())));
+
+            // Kırmızı arka plan + beyaz yazı; aksi halde normal
+            String rowStyle = isFailed
+                    ? "background:#d32f2f;color:#ffffff;"
+                    : "background:#ffffff;color:#000000;";
+
+            html.append("<table border='1' style='border-collapse:collapse;width:100%;margin:0 0 8px 0;'>")
+                    .append("<thead>")
+                    .append("<tr style='background:#f2f2f2;color:#000;'>")
+                    .append("<th style='text-align:left;padding:6px 8px;'>Alan</th>")
+                    .append("<th style='text-align:left;padding:6px 8px;'>Değer</th>")
+                    .append("</tr>")
+                    .append("</thead>")
+                    .append("<tbody>");
+
+            // Tek satırda tüm alanları gösteriyoruz; isFailed ise bu satır kırmızı olacak
+            html.append("<tr style='").append(rowStyle).append("'>")
+                    .append(td("Talep No")).append(td(s(e.getId())))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("Mektup Tipi"))
+                    .append(td(s(MektupTipEnum.convertRequestTypeIdToMektupTip(e.getRequestTypeId()).getAdi())))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("Scope ID"))
+                    .append(td(s(ScopeTypeEnum.getBykod(Objects.toString(e.getScopeId(), "")).getAdi())))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("Scope Değeri"))
+                    .append(td(s(e.getScopeValue() != null ? e.getScopeValue() : "-")))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("İlk Ödeme Tarihi"))
+                    .append(td(fmtDate(e.getFirstPaymentDate())))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("Son Ödeme Tarihi"))
+                    .append(td(fmtDate(e.getLastPaymentDate())))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("Sorgu Durum"))
+                    .append(td(s(LetterStatusEnum.getByKod(String.valueOf(e.getStatusId())).getAdi())))
+                    .append("</tr>");
+            html.append("<tr>").append(td("Sorgu Tarihi"))
+                    .append(e.getCreatedAt().format(TS_FMT))
+                    .append("</tr>");
+
+            html.append("<tr>").append(td("Sorgu Durum Detay"))
+                    .append(td(s(e.getLastErrorMessage())))
+                    .append("</tr>");
+
+            html.append("</tbody></table>");
+            html.append("<div style='font-size:12px;color:#666;margin:2px 0 16px 0;'>").append("</div>");
+
+
+        }
+        // Bilgi satırı
+
+        html.append("</div>");
+        return html.toString();
+    }
+
+
+    private String td(String text) {
+        return "<td style='padding:6px 8px;vertical-align:top;'>" + escape(text) + "</td>";
+    }
+
+    private String s(Object o) {
+        return o == null ? "-" : String.valueOf(o);
+    }
+
+    private String fmtDate(java.time.LocalDate d) {
+        return d == null ? "-" : d.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+    }
+
+    // Basit HTML escape (gerekirse Apache Commons StringEscapeUtils kullan)
+    private String escape(String raw) {
+        if (raw == null) return "-";
+        return raw.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+    }
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
