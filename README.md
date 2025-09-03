@@ -1,3 +1,122 @@
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
+private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
+
+private String buildMailBody(List<LetterRequest> list) throws ValidationException {
+    if (list == null || list.isEmpty()) {
+        throw new ValidationException("Talep kaydı bulunamadı!");
+    }
+
+    StringBuilder html = new StringBuilder();
+    html.append("<div style='font-family:Arial,Helvetica,sans-serif;font-size:14px;'>");
+
+    for (LetterRequest e : list) {
+        // Tekrar dene statüsü ve BAŞARISIZ kontrolü
+        String retryStatus = Optional.ofNullable(getRetryStatus(e)).orElse("YOK");
+        boolean isFailed = "BAŞARISIZ".equalsIgnoreCase(retryStatus)
+                        || "FAILED".equalsIgnoreCase(retryStatus);
+
+        // Kırmızı arka plan + beyaz yazı; aksi halde normal
+        String rowStyle = isFailed
+                ? "background:#d32f2f;color:#ffffff;"
+                : "background:#ffffff;color:#000000;";
+
+        html.append("<table border='1' style='border-collapse:collapse;width:100%;margin:0 0 8px 0;'>")
+            .append("<thead>")
+            .append("<tr style='background:#f2f2f2;color:#000;'>")
+            .append("<th style='text-align:left;padding:6px 8px;'>Alan</th>")
+            .append("<th style='text-align:left;padding:6px 8px;'>Değer</th>")
+            .append("</tr>")
+            .append("</thead>")
+            .append("<tbody>");
+
+        // Tek satırda tüm alanları gösteriyoruz; isFailed ise bu satır kırmızı olacak
+        html.append("<tr style='").append(rowStyle).append("'>")
+            .append(td("Talep No")).append(td(s(e.getId())))
+            .append("</tr>");
+
+        html.append("<tr>").append(td("Mektup Tipi ID"))
+            .append(td(s(MektupTipEnum.convertRequestTypeToMektupTip(e.getRequestTypeId()).getId())))
+            .append("</tr>");
+
+        html.append("<tr>").append(td("Scope ID"))
+            .append(td(s(ScopeTypeEnum.getByValue(Objects.toString(e.getScopeTypeId(), "")).getId())))
+            .append("</tr>");
+
+        html.append("<tr>").append(td("Scope Değeri"))
+            .append(td(s(e.getScopeValue() != null ? e.getScopeValue() : "BULK")))
+            .append("</tr>");
+
+        html.append("<tr>").append(td("İlk Ödeme Tarihi"))
+            .append(td(fmtDate(e.getFirstPaymentDate())))
+            .append("</tr>");
+
+        html.append("<tr>").append(td("Son Ödeme Tarihi"))
+            .append(td(fmtDate(e.getLastPaymentDate())))
+            .append("</tr>");
+
+        html.append("<tr>").append(td("Tekrar Dene Statüs"))
+            .append(td(s(retryStatus)))
+            .append("</tr>");
+
+        html.append("</tbody></table>");
+
+        // Bilgi satırı
+        html.append("<div style='font-size:12px;color:#666;margin:2px 0 16px 0;'>")
+            .append("Bu e-posta otomatik oluşturulmuştur. İşlem saati: ")
+            .append(LocalDateTime.now().format(TS_FMT))
+            .append("</div>");
+    }
+
+    html.append("</div>");
+    return html.toString();
+}
+
+/* ---- küçük yardımcılar ---- */
+
+// Güvenli hücre üretimi
+private String td(String text) {
+    return "<td style='padding:6px 8px;vertical-align:top;'>" + escape(text) + "</td>";
+}
+
+// Null güvenli string
+private String s(Object o) {
+    return o == null ? "-" : String.valueOf(o);
+}
+
+// Tarih formatlama (kendindeki DateUtils varsa onu kullan)
+private String fmtDate(java.time.LocalDate d) {
+    return d == null ? "-" : d.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+}
+
+// Basit HTML escape (gerekirse Apache Commons StringEscapeUtils kullan)
+private String escape(String raw) {
+    if (raw == null) return "-";
+    return raw.replace("&", "&amp;")
+              .replace("<", "&lt;")
+              .replace(">", "&gt;")
+              .replace("\"", "&quot;")
+              .replace("'", "&#39;");
+}
+
+/**
+ * Projende statü nereden geliyorsa burayı ona göre uyarlayabilirsin.
+ * Örn: e.getRetryStatus(), e.isRetryFailed() ? "BAŞARISIZ" : "BAŞARILI" vb.
+ */
+private String getRetryStatus(LetterRequest e) {
+    // Örnek uyarlama:
+    if (e == null) return null;
+    if (e.isRetryFailed() != null && e.isRetryFailed()) return "BAŞARISIZ";
+    return e.getRetryStatus(); // varsa
+}
+
+
+
+
 package your.pkg.util;
 
 import java.time.DayOfWeek;
